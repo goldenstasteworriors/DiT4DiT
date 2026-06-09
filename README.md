@@ -36,6 +36,7 @@ DiT4DiT is a <b><span style="color: #FF8C00;">Vision-Action-Model (VAM)</span></
 
 ## News
 
+- **[2026-06-09]** We release real G1 teleoperation, training, and deployment code [here](examples/Real_G1/deployment.md).
 - **[2026-04-15]** Initial release of DiT4DiT with training, evaluation, and deployment code.
 - **[2026-03-11]** We release the [arXiv paper](https://arxiv.org/abs/2603.10448).
 
@@ -121,8 +122,8 @@ DiT4DiT is a <b><span style="color: #FF8C00;">Vision-Action-Model (VAM)</span></
 
 ## TODOs
 
-- [ ] Release teleoperation, training and deployment code for Unitree G1 tabletop tasks.
-- [ ] Release teleoperation, training and deployment code for Unitree G1 whole-body control tasks.
+- [x] ~~Release teleoperation, training and deployment code for Unitree G1 tabletop tasks.~~
+- [x] ~~Release teleoperation, training and deployment code for Unitree G1 whole-body control tasks.~~
 
 ## Project Structure
 
@@ -209,7 +210,7 @@ We release pretrained checkpoints to facilitate reproduction.
 
 ### Real Robot
 
-Coming soon.
+- **Unitree G1 (Decoupled WholeBodyControl)**: For real-robot data collection, replay, and closed-loop deployment on a Unitree G1, see the full guide [here](examples/Real_G1/deployment.md).
 
 ## Results
 
@@ -283,6 +284,7 @@ This project builds upon:
 - [GR00T](https://github.com/NVIDIA/Isaac-GR00T) by NVIDIA
 - [Robocasa](https://github.com/robocasa/robocasa)
 - [LeRobot](https://github.com/huggingface/lerobot) by Hugging Face
+- [GR00T-WholeBodyControl](https://github.com/NVlabs/GR00T-WholeBodyControl) by NVIDIA
 
 
 

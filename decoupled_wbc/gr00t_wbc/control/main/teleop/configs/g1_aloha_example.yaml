@@ -1,0 +1,37 @@
+# Example configuration for G1 with ALOHA grippers
+# Save as: gr00t_wbc/control/main/teleop/configs/g1_aloha_example.yaml
+
+# Hand configuration
+with_hands: true
+hand_type: "aloha"  # Options: "three_finger" or "aloha"
+aloha_dds_topic: "rt/aloha_hand/cmd"  # DDS topic for ALOHA gripper commands
+aloha_state_topic: "rt/aloha_hand/state"  # DDS topic for ALOHA gripper state feedback
+use_aloha_feedback: true  # Enable real-time feedback from grippers (recommended for data collection)
+
+# Robot configuration
+ROBOT_TYPE: "g1_29dof"
+ENV_TYPE: "real"  # or "sim" for simulation
+NUM_JOINTS: 29
+
+# Control parameters
+REWARD_DT: 0.02  # 50 Hz
+SIMULATE_DT: 0.002
+
+# Gravity compensation
+enable_gravity_compensation: false
+gravity_compensation_joints: ["arms"]
+
+# WBC configuration
+VERSION: "gear_wbc"
+GEAR_WBC_CONFIG: "gr00t_wbc/sim2mujoco/resources/robots/g1/policy_cfg.yaml"
+model_path: "policy_1.onnx,policy_2.onnx"
+
+# Upper body control
+upper_body_policy_type: "interpolation"
+upper_body_max_joint_speed: 1000
+
+# Visualization
+ENABLE_ONSCREEN: true
+ENABLE_OFFSCREEN: false
+
+# Note: Make sure aloha_gripper_dds_bridge.py is running on the robot before starting control

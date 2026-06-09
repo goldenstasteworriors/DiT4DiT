@@ -1,0 +1,139 @@
+# Jetson-specific Dockerfile with ROS2 Foxy (already installed on Jetson) and Python 3.10
+# Use Ubuntu 22.04 which has Python 3.10 by default
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+
+# Accept build argument for username
+ARG USERNAME
+ARG USERID
+ARG HOME_DIR
+ARG WORKTREE_NAME
+
+# Install system dependencies - Python 3.10 is default on Ubuntu 22.04
+USER root
+RUN apt-get update && apt-get install -y \
+    git \
+    tmux \
+    curl \
+    wget \
+    vim \
+    sudo \
+    udev \
+    python3 \
+    python3-venv \
+    python3-dev \
+    python3-pip \
+    build-essential \
+    xdg-utils \
+    cmake \
+    libusb-1.0-0 \
+    libusb-1.0-0-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create user with the same name as host
+RUN if [ "$USERID" != "0" ]; then \
+        useradd -m -u ${USERID} -s /bin/bash ${USERNAME} && \
+        echo "${USERNAME} ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers && \
+        # Add user to video and render groups for GPU access
+        usermod -a -G video,render,dialout ${USERNAME} || true; \
+    fi
+
+# Copy .bashrc with color settings before switching user
+COPY --chown=${USERNAME}:${USERNAME} docker/.bashrc ${HOME_DIR}/.bashrc
+
+# Install Manus udev rules
+COPY --chown=${USERNAME}:${USERNAME} docker/70-manus-hid.rules /etc/udev/rules.d/70-manus-hid.rules
+
+# Copy tmux configuration
+COPY --chown=${USERNAME}:${USERNAME} docker/.tmux.conf ${HOME_DIR}/.tmux.conf
+
+# Switch to user
+USER ${USERNAME}
+
+# Install tmux plugin manager and uv in parallel
+RUN git clone https://github.com/tmux-plugins/tpm ${HOME_DIR}/.tmux/plugins/tpm & \
+    curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=${HOME_DIR}/.cargo/bin sh & \
+    wait
+
+# Install tmux plugins automatically
+RUN ${HOME_DIR}/.tmux/plugins/tpm/bin/install_plugins || true
+
+# Add uv to PATH
+ENV PATH="${HOME_DIR}/.cargo/bin:$PATH"
+ENV UV_PYTHON=${HOME_DIR}/venv/bin/python
+
+# Create venv with Python 3.10 (which is python3 on Ubuntu 22.04)
+RUN uv venv --python python3 ${HOME_DIR}/venv
+
+# Install ARM64-specific packages (Pico robotics service for Jetson)
+USER root
+COPY --chown=${USERNAME}:${USERNAME} gr00t_wbc/control/teleop/device/pico/roboticsservice_1.0.0.0_arm64.deb ${HOME_DIR}/roboticsservice_1.0.0.0_arm64.deb
+
+# Install robotics service with proper error handling
+RUN dpkg -i ${HOME_DIR}/roboticsservice_1.0.0.0_arm64.deb 2>&1 | grep -v "xdg-icon-resource" || true && \
+    apt-get update && apt-get install -f -y && \
+    rm ${HOME_DIR}/roboticsservice_1.0.0.0_arm64.deb || true
+
+USER ${USERNAME}
+
+# Set working directory
+WORKDIR ${HOME_DIR}/Projects/${WORKTREE_NAME}
+
+# Copy project files
+COPY --chown=${USERNAME}:${USERNAME} . ${HOME_DIR}/Projects/${WORKTREE_NAME}
+
+# Ensure proper permissions for the project directory (fix any permission issues)
+USER root
+RUN chown -R ${USERNAME}:${USERNAME} ${HOME_DIR}/Projects/${WORKTREE_NAME} && \
+    chmod -R u+rwX ${HOME_DIR}/Projects/${WORKTREE_NAME}
+USER ${USERNAME}
+
+# Build CycloneDDS if not already present
+RUN if [ ! -d "${HOME_DIR}/Projects/${WORKTREE_NAME}/external_dependencies/unitree_sdk2_python/cyclonedds/install" ]; then \
+        echo "Building CycloneDDS from source..." && \
+        cd ${HOME_DIR}/Projects/${WORKTREE_NAME}/external_dependencies/unitree_sdk2_python && \
+        git clone https://github.com/eclipse-cyclonedds/cyclonedds.git && \
+        cd cyclonedds && \
+        git checkout 0.10.4 && \
+        mkdir -p build install && \
+        cd build && \
+        cmake -DCMAKE_INSTALL_PREFIX=../install -DBUILD_SHARED_LIBS=ON -DENABLE_SSL=NO -DENABLE_SECURITY=NO .. && \
+        make -j4 && \
+        make install && \
+        cd .. && rm -rf build && \
+        echo "CycloneDDS built successfully at $(pwd)/install"; \
+    else \
+        echo "Using existing CycloneDDS installation"; \
+    fi
+
+# Verify CycloneDDS installation
+RUN ls -la ${HOME_DIR}/Projects/${WORKTREE_NAME}/external_dependencies/unitree_sdk2_python/cyclonedds/install || echo "CycloneDDS install directory not found!"
+
+# Set CycloneDDS environment variables BEFORE pip install (needed at build time)
+ENV CYCLONEDDS_HOME=${HOME_DIR}/Projects/${WORKTREE_NAME}/external_dependencies/unitree_sdk2_python/cyclonedds/install
+ENV CMAKE_PREFIX_PATH=${HOME_DIR}/Projects/${WORKTREE_NAME}/external_dependencies/unitree_sdk2_python/cyclonedds/install
+ENV LD_LIBRARY_PATH=${HOME_DIR}/Projects/${WORKTREE_NAME}/external_dependencies/unitree_sdk2_python/cyclonedds/install/lib:$LD_LIBRARY_PATH
+
+# Install unitree_sdk2_python first (it needs CycloneDDS)
+RUN . ${HOME_DIR}/venv/bin/activate && \
+    uv pip install --upgrade pip && \
+    echo "CYCLONEDDS_HOME=$CYCLONEDDS_HOME" && \
+    ls -la $CYCLONEDDS_HOME && \
+    uv pip install -e external_dependencies/unitree_sdk2_python
+
+# Install main project (gr00t-wbc) 
+RUN . ${HOME_DIR}/venv/bin/activate && \
+    uv pip install -e .
+
+# Source ROS2 Foxy (from host) in bashrc - will use host's ROS2 installation via volume mount
+RUN echo "if [ -f /opt/ros/foxy/setup.bash ]; then source /opt/ros/foxy/setup.bash; fi" >> ${HOME_DIR}/.bashrc && \
+    echo "source ${HOME_DIR}/venv/bin/activate" >> ${HOME_DIR}/.bashrc
+
+# Set environment variables
+ENV ROS_DOMAIN_ID=0
+ENV PYTHONUNBUFFERED=1
+
+# Default command
+CMD ["/bin/bash"]

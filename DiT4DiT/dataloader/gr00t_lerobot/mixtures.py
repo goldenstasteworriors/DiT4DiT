@@ -396,6 +396,9 @@ DATASET_NAMED_MIXTURES = {
         ("move_spoon", 1.0, "g1_body29_aloha_arms_only"),
         ("stack_cups", 1.0, "g1_body29_aloha_arms_only"),
         ("packaging", 1.0, "g1_body29_aloha_arms_only"),
+    ],
+    "g1_decoupled_wbc": [
+        ("your_g1_dataset_name", 1.0, "g1_body29_aloha_full_body"),
     ]
 }
 

@@ -1045,6 +1045,33 @@ class UnitreeG1AlohaOnlyArmsDataConfig(UnitreeG1DataConfig):
     action_indices = list(range(16))
 
 
+class UnitreeG1AlohaFullBodyDataConfig(UnitreeG1DataConfig):
+    video_keys = ["video.ego_view"]
+    state_keys = [
+        "state.left_arm",
+        "state.right_arm",
+        "state.left_gripper",
+        "state.right_gripper",
+        "state.rpy",
+        "state.height",
+    ]
+    action_keys = [
+        "action.left_arm",
+        "action.right_arm",
+        "action.left_gripper",
+        "action.right_gripper",
+        "action.rpy",
+        "action.height",
+        "action.torso_vx",
+        "action.torso_vy",
+        "action.torso_vyaw",
+    ]
+    language_keys = ["annotation.human.task_description"]
+    observation_indices = [0]
+    action_indices = list(range(50))
+
+
+
 ROBOT_TYPE_CONFIG_MAP = {
     "libero_franka": Libero4in1DataConfig(),
     "oxe_droid": OxeDroidDataConfig(),
@@ -1058,5 +1085,6 @@ ROBOT_TYPE_CONFIG_MAP = {
     "fourier_gr1_arms_waist": FourierGr1ArmsWaistDataConfig(),
     "custom_robot_config": SingleFrankaRobotiqDeltaEefDataConfig(),
     "g1_body29_aloha_arms_only": UnitreeG1AlohaOnlyArmsDataConfig(),
+    "g1_body29_aloha_full_body": UnitreeG1AlohaFullBodyDataConfig(),
 }
 
