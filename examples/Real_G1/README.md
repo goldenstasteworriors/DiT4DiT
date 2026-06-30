@@ -1,4 +1,4 @@
-# Teleop, Training & Deployment Tuttutorial
+# Teleop, Training & Deployment Tutorial
 
 A deployment toolchain wrapping NVIDIA GR00T Whole-Body Control to drive a real Unitree G1: data collection via teleoperation, replay, training and closed-loop policy inference.
 
