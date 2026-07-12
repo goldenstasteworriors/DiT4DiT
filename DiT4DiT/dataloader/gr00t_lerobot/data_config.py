@@ -1071,6 +1071,74 @@ class UnitreeG1AlohaFullBodyDataConfig(UnitreeG1DataConfig):
     action_indices = list(range(50))
 
 
+class PipetteRightJointsDataConfig(BaseDataConfig):
+    """Right-arm-only pipette data; independent from all G1 data configs."""
+
+    video_keys = ["video.ego_view"]
+    state_keys = ["state.right_arm", "state.right_hand"]
+    action_keys = ["action.right_arm", "action.right_hand"]
+    language_keys = ["annotation.human.task_description"]
+    observation_indices = [0]
+    action_indices = list(range(16))
+
+    def modality_config(self):
+        return {
+            "video": ModalityConfig(delta_indices=self.observation_indices, modality_keys=self.video_keys),
+            "state": ModalityConfig(delta_indices=self.observation_indices, modality_keys=self.state_keys),
+            "action": ModalityConfig(delta_indices=self.action_indices, modality_keys=self.action_keys),
+            "language": ModalityConfig(delta_indices=self.observation_indices, modality_keys=self.language_keys),
+        }
+
+    def transform(self):
+        transforms = [
+            StateActionToTensor(apply_to=self.state_keys),
+            StateActionTransform(
+                apply_to=self.state_keys,
+                normalization_modes={key: "q99" for key in self.state_keys},
+            ),
+            StateActionToTensor(apply_to=self.action_keys),
+            StateActionTransform(
+                apply_to=self.action_keys,
+                normalization_modes={key: "q99" for key in self.action_keys},
+            ),
+        ]
+        return ComposedModalityTransform(transforms=transforms)
+
+
+class PipetteRightWristDeltaDataConfig(BaseDataConfig):
+    """Right wrist relative SE(3) + dexterous-hand action representation."""
+
+    video_keys = ["video.ego_view"]
+    state_keys = ["state.right_wrist_pos", "state.right_wrist_abs_quat", "state.right_hand"]
+    action_keys = ["action.right_wrist_delta_pos", "action.right_wrist_delta_rot_6d", "action.right_hand"]
+    language_keys = ["annotation.human.task_description"]
+    observation_indices = [0]
+    action_indices = list(range(16))
+
+    def modality_config(self):
+        return {
+            "video": ModalityConfig(delta_indices=self.observation_indices, modality_keys=self.video_keys),
+            "state": ModalityConfig(delta_indices=self.observation_indices, modality_keys=self.state_keys),
+            "action": ModalityConfig(delta_indices=self.action_indices, modality_keys=self.action_keys),
+            "language": ModalityConfig(delta_indices=self.observation_indices, modality_keys=self.language_keys),
+        }
+
+    def transform(self):
+        transforms = [
+            StateActionToTensor(apply_to=self.state_keys),
+            StateActionTransform(
+                apply_to=self.state_keys,
+                normalization_modes={key: "q99" for key in self.state_keys},
+            ),
+            StateActionToTensor(apply_to=self.action_keys),
+            StateActionTransform(
+                apply_to=self.action_keys,
+                normalization_modes={key: "q99" for key in self.action_keys},
+            ),
+        ]
+        return ComposedModalityTransform(transforms=transforms)
+
+
 
 ROBOT_TYPE_CONFIG_MAP = {
     "libero_franka": Libero4in1DataConfig(),
@@ -1086,5 +1154,6 @@ ROBOT_TYPE_CONFIG_MAP = {
     "custom_robot_config": SingleFrankaRobotiqDeltaEefDataConfig(),
     "g1_body29_aloha_arms_only": UnitreeG1AlohaOnlyArmsDataConfig(),
     "g1_body29_aloha_full_body": UnitreeG1AlohaFullBodyDataConfig(),
+    "pipette_right_joints": PipetteRightJointsDataConfig(),
+    "pipette_right_wrist_delta": PipetteRightWristDeltaDataConfig(),
 }
-

@@ -1,0 +1,100 @@
+run_id: pipette_right_wrist_delta_action_dit
+run_root_dir: /home/nvme02/DiT4DiT_runs
+seed: 43
+trackers: [jsonl, wandb]
+wandb_entity: 2004kjy666-huazhong-university-of-science-and-technology
+wandb_project: DiT4DiT_Pipette_RightOnly
+is_debug: false
+
+framework:
+  name: DiT4DiT
+  cosmos25:
+    future_num_inference_steps: 1
+    future_loss_type: flow_matching
+    extract_layer: 17
+    base_model: /home/nvme02/DiT4DiT_weights/Cosmos-Predict2.5-2B
+    attn_implementation: flash_attention_2
+    vl_hidden_dim: 2048
+    training: action
+    flow_matching:
+      time_distribution: logit_normal
+      high_sigma_ratio: 0.05
+      high_sigma_min: 0.98
+    conditional_frame_timestep: 0.0001
+  action_model:
+    action_model_type: DiT-B
+    hidden_size: 2560
+    add_pos_embed: true
+    max_seq_len: 1024
+    action_dim: 16
+    state_dim: 16
+    future_action_window_size: 15
+    action_horizon: 16
+    past_action_window_size: 0
+    repeated_diffusion_steps: 8
+    noise_beta_alpha: 1.5
+    noise_beta_beta: 1.0
+    noise_s: 0.999
+    num_timestep_buckets: 1000
+    num_inference_timesteps: 4
+    num_target_vision_tokens: 32
+    diffusion_model_cfg:
+      cross_attention_dim: 2048
+      dropout: 0.2
+      final_dropout: true
+      interleave_self_attention: true
+      norm_type: ada_norm
+      num_layers: 16
+      output_dim: 2560
+      positional_embeddings: null
+
+datasets:
+  vla_data:
+    dataset_py: lerobot_datasets
+    data_root_dir: /home/nvme02/DiT4DiT_data/derived
+    data_mix: pipette_right_wrist_delta
+    include_state: true
+    action_type: relative_wrist_pose
+    default_image_resolution: [3, 224, 224]
+    per_device_batch_size: 1
+    load_all_data_for_training: true
+    obs: [ego_view]
+    image_size: [224, 224]
+    delete_pause_frame: false
+    video_delta_indices: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+    max_state_dim: 16
+    max_action_dim: 16
+    action_video_freq_ratio: 2
+    video_backend: decord
+
+trainer:
+  epochs: 100
+  max_train_steps: 10000
+  num_warmup_steps: 500
+  save_interval: 1000
+  eval_interval: 500
+  learning_rate:
+    base: 1.0e-5
+    backbone_interface: 0.0
+    action_model: 1.0e-4
+  lr_scheduler_type: cosine_with_min_lr
+  scheduler_specific_kwargs: {min_lr: 5.0e-7}
+  freeze_modules: backbone_interface
+  repeated_diffusion_steps: 4
+  max_grad_norm: 1.0
+  warmup_ratio: 0.1
+  weight_decay: 0.0
+  logging_frequency: 10
+  gradient_clipping: 1.0
+  gradient_accumulation_steps: 1
+  optimizer:
+    name: AdamW
+    betas: [0.9, 0.95]
+    eps: 1.0e-8
+    weight_decay: 1.0e-8
+  pretrained_checkpoint: null
+  is_resume: false
+  resume_epoch: null
+  resume_step: null
+  enable_gradient_checkpointing: false
+  enable_mixed_precision_training: true

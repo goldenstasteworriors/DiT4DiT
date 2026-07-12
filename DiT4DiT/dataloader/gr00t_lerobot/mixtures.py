@@ -12,6 +12,13 @@ from typing import Dict, List, Tuple
 ## {nakename: [(data_name, sampling_weight, robot_type)] }
 DATASET_NAMED_MIXTURES = {
 
+    "pipette_right_joints": [
+        ("pick_up_pipette_right_joints", 1.0, "pipette_right_joints"),
+    ],
+    "pipette_right_wrist_delta": [
+        ("pick_up_pipette_right_wrist_delta", 1.0, "pipette_right_wrist_delta"),
+    ],
+
     "custom_dataset": [
         ("custom_dataset_name", 1.0, "custom_robot_config"),
     ],
@@ -401,4 +408,3 @@ DATASET_NAMED_MIXTURES = {
         ("your_g1_dataset_name", 1.0, "g1_body29_aloha_full_body"),
     ]
 }
-
