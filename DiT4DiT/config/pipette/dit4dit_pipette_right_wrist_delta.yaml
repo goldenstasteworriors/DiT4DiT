@@ -73,6 +73,7 @@ trainer:
   num_warmup_steps: 500
   save_interval: 4000
   max_checkpoints_to_keep: 2
+  checkpoint_modules: action_model
   eval_interval: 500
   learning_rate:
     base: 1.0e-5

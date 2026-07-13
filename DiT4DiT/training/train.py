@@ -305,6 +305,7 @@ class VLATrainer(TrainerUtils):
             checkpoint_path = os.path.join(self.checkpoint_dir, f"steps_{self.completed_steps}")
             # save model state
             state_dict = self.accelerator.get_state_dict(self.model)
+            state_dict = self._filter_checkpoint_state_dict(state_dict)
             torch.save(state_dict, checkpoint_path + "_pytorch_model.pt")
             self._prune_checkpoints()
 
@@ -330,6 +331,29 @@ class VLATrainer(TrainerUtils):
                 logger.info("✅ Configuration files saved")
 
         self.accelerator.wait_for_everyone()
+
+    def _filter_checkpoint_state_dict(self, state_dict):
+        """Optionally retain only configured top-level modules in checkpoints."""
+        checkpoint_modules = getattr(self.config.trainer, "checkpoint_modules", "")
+        if not isinstance(checkpoint_modules, str):
+            return state_dict
+        module_names = [name.strip() for name in checkpoint_modules.split(",") if name.strip()]
+        if not module_names:
+            return state_dict
+
+        prefixes = tuple(f"{name}." for name in module_names)
+        filtered_state_dict = {key: value for key, value in state_dict.items() if key.startswith(prefixes)}
+        if not filtered_state_dict:
+            raise RuntimeError(
+                f"None of checkpoint_modules={module_names!r} were found in the model state dict"
+            )
+        logger.info(
+            "Saving checkpoint modules %s (%d/%d tensors)",
+            module_names,
+            len(filtered_state_dict),
+            len(state_dict),
+        )
+        return filtered_state_dict
 
     def _prune_checkpoints(self):
         """Keep only the newest configured number of complete model checkpoints."""
@@ -581,6 +605,7 @@ class VLATrainer(TrainerUtils):
             final_checkpoint = os.path.join(self.config.output_dir, "final_model")
             os.makedirs(final_checkpoint, exist_ok=True)
             state_dict = self.accelerator.get_state_dict(self.model)
+            state_dict = self._filter_checkpoint_state_dict(state_dict)
             torch.save(state_dict, os.path.join(final_checkpoint, "pytorch_model.pt"))
             logger.info(f"Training complete. Final model saved at {final_checkpoint}")
 
