@@ -1031,6 +1031,13 @@ class _Cosmos25_Interface(nn.Module):
     ):
         _ = kwargs
 
+        # Action-only training uses the pretrained video DiT purely as a frozen
+        # feature extractor.  Do not construct or return a future-video loss,
+        # even when the dataloader provides a temporal image window.
+        training_mode = str(getattr(self.config.framework.cosmos25, "training", "joint")).lower()
+        if training_mode == "action":
+            future_videos = None
+
         future_loss = None
         pred_future_video = None
         fixed_seed = 42
@@ -1083,5 +1090,4 @@ class _Cosmos25_Interface(nn.Module):
         out = BackboneOutput(hidden_states=[bsd], future_video_loss=future_loss, pred_future_video=pred_future_video)
         # return out if return_dict else (out.hidden_states,)
         return out
-
 

@@ -7,12 +7,11 @@ def get_backbone_model(config):
 
     # Cosmos2.5 diffusion transformer feature extractor (video -> hidden)
 
-    if training_mode == "joint":
+    if training_mode in {"joint", "action"}:
         from .Cosmos25 import _Cosmos25_Interface
         return _Cosmos25_Interface(config)
 
     else:
         raise NotImplementedError(f"Backbone model is not implemented")
-
 
 
