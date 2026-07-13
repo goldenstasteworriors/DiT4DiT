@@ -11,11 +11,11 @@ cd "${ROOT}"
 
 export PYTHONPATH="${ROOT}:${PYTHONPATH:-}"
 export PYTHONNOUSERSITE=1
-export WANDB_MODE=online
+export WANDB_MODE=offline
 export NCCL_TIMEOUT=10000
 export NCCL_SOCKET_TIMEOUT_MS=360000
 
-CUDA_VISIBLE_DEVICES=0,3 nohup "${CONDA}" run -n dit4dit accelerate launch \
+CUDA_VISIBLE_DEVICES=3,4 nohup "${CONDA}" run -n dit4dit accelerate launch \
   --config_file "${ACCELERATE_CONFIG}" \
   --num_machines 1 --num_processes 2 --main_process_port 29631 \
   DiT4DiT/training/train.py \
@@ -31,5 +31,5 @@ CUDA_VISIBLE_DEVICES=2,6 nohup "${CONDA}" run -n dit4dit accelerate launch \
   >"${RUN_ROOT}/pipette_right_wrist_delta_action_dit/train.log" 2>&1 &
 echo $! >"${RUN_ROOT}/pipette_right_wrist_delta_action_dit/launcher.pid"
 
-echo "joint training: GPUs 0,3"
+echo "joint training: GPUs 3,4"
 echo "wrist-delta training: GPUs 2,6"
