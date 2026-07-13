@@ -23,7 +23,7 @@ CUDA_VISIBLE_DEVICES=0,3 nohup "${CONDA}" run -n dit4dit accelerate launch \
   >"${RUN_ROOT}/pipette_right_joints_action_dit/train.log" 2>&1 &
 echo $! >"${RUN_ROOT}/pipette_right_joints_action_dit/launcher.pid"
 
-CUDA_VISIBLE_DEVICES=2,5 nohup "${CONDA}" run -n dit4dit accelerate launch \
+CUDA_VISIBLE_DEVICES=2,6 nohup "${CONDA}" run -n dit4dit accelerate launch \
   --config_file "${ACCELERATE_CONFIG}" \
   --num_machines 1 --num_processes 2 --main_process_port 29632 \
   DiT4DiT/training/train.py \
@@ -32,4 +32,4 @@ CUDA_VISIBLE_DEVICES=2,5 nohup "${CONDA}" run -n dit4dit accelerate launch \
 echo $! >"${RUN_ROOT}/pipette_right_wrist_delta_action_dit/launcher.pid"
 
 echo "joint training: GPUs 0,3"
-echo "wrist-delta training: GPUs 2,5"
+echo "wrist-delta training: GPUs 2,6"
