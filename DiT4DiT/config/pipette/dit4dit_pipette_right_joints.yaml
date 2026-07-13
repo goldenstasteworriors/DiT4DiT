@@ -71,7 +71,8 @@ trainer:
   epochs: 100
   max_train_steps: 10000
   num_warmup_steps: 500
-  save_interval: 1000
+  save_interval: 4000
+  max_checkpoints_to_keep: 2
   eval_interval: 500
   learning_rate:
     base: 1.0e-5
@@ -93,7 +94,7 @@ trainer:
     eps: 1.0e-8
     weight_decay: 1.0e-8
   pretrained_checkpoint: null
-  is_resume: false
+  is_resume: true
   resume_epoch: null
   resume_step: null
   enable_gradient_checkpointing: false

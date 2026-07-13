@@ -8,6 +8,7 @@ the right arm/right dexterous hand state, and one of two right-only action space
 
 The Cosmos video backbone is frozen completely and the Action DiT is initialized randomly. No left-arm,
 lower-body, waist, root-state, motion-token, SMPL, or planner fields are included in the derived parquet files.
+Both training configs save every 4000 steps and retain only the newest two complete checkpoints.
 
 Prepare datasets:
 

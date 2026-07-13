@@ -306,6 +306,7 @@ class VLATrainer(TrainerUtils):
             # save model state
             state_dict = self.accelerator.get_state_dict(self.model)
             torch.save(state_dict, checkpoint_path + "_pytorch_model.pt")
+            self._prune_checkpoints()
 
             # save training metadata
             summary_data = {
@@ -329,6 +330,21 @@ class VLATrainer(TrainerUtils):
                 logger.info("✅ Configuration files saved")
 
         self.accelerator.wait_for_everyone()
+
+    def _prune_checkpoints(self):
+        """Keep only the newest configured number of complete model checkpoints."""
+        keep = int(getattr(self.config.trainer, "max_checkpoints_to_keep", 0) or 0)
+        if keep <= 0:
+            return
+        checkpoints = []
+        for path in Path(self.checkpoint_dir).glob("steps_*_pytorch_model.pt"):
+            match = re.fullmatch(r"steps_(\d+)_pytorch_model\.pt", path.name)
+            if match and path.is_file() and path.stat().st_size > 0:
+                checkpoints.append((int(match.group(1)), path))
+        checkpoints.sort(key=lambda item: item[0])
+        for _, path in checkpoints[:-keep]:
+            path.unlink()
+            logger.info(f"Removed old checkpoint: {path}")
 
     def _log_metrics(self, metrics):
         """record training metrics"""
@@ -556,8 +572,12 @@ class VLATrainer(TrainerUtils):
 
     def _finalize_training(self):
         """training end processing"""
-        # save final model
-        if self.accelerator.is_main_process:
+        keep = int(getattr(self.config.trainer, "max_checkpoints_to_keep", 0) or 0)
+        if keep > 0:
+            # Retention-enabled runs save the terminal step in the same rolling
+            # checkpoint series so the total number of weight files stays bounded.
+            self._save_checkpoint()
+        elif self.accelerator.is_main_process:
             final_checkpoint = os.path.join(self.config.output_dir, "final_model")
             os.makedirs(final_checkpoint, exist_ok=True)
             state_dict = self.accelerator.get_state_dict(self.model)
