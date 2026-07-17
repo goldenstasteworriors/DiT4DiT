@@ -23,3 +23,15 @@ Launch both two-GPU runs:
 ```bash
 bash examples/PipetteRightOnly/launch_two_trainings.sh
 ```
+
+On A800_1, the persistent project, datasets, model weights, caches, runs, and packed environment
+are all under `/workspace/WM`. Because that mount is `noexec`, restore the packed environment to
+the executable RAM filesystem before launching:
+
+```bash
+bash examples/PipetteRightOnly/restore_a800_environment.sh
+bash examples/PipetteRightOnly/launch_two_trainings_a800.sh
+```
+
+The A800 launcher defaults to GPU pairs `0,1` and `2,3`. Override them after checking current GPU
+occupancy, for example `JOINT_GPUS=4,5 WRIST_GPUS=6,7 bash .../launch_two_trainings_a800.sh`.
