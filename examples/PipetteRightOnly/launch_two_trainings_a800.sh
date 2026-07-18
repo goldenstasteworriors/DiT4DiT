@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT=/workspace/WM/DiT4DiT
-RUN_ROOT=/workspace/WM/DiT4DiT_runs
+ROOT=/workspace/WM/dit4dit/DiT4DiT
+RUN_ROOT=/workspace/WM/dit4dit/DiT4DiT_runs
 PYTHON=/dev/shm/conda_envs/dit4dit/bin/python
 ACCELERATE_CONFIG=DiT4DiT/config/deepseeds/deepspeed_zero2.yaml
 JOINT_GPUS=${JOINT_GPUS:-0,1}
@@ -19,8 +19,8 @@ cd "${ROOT}"
 export PYTHONPATH="${ROOT}:${PYTHONPATH:-}"
 export PYTHONNOUSERSITE=1
 export WANDB_MODE=offline
-export HF_HOME=/workspace/WM/DiT4DiT_cache/huggingface
-export TORCH_HOME=/workspace/WM/DiT4DiT_cache/torch
+export HF_HOME=/workspace/WM/dit4dit/DiT4DiT_cache/huggingface
+export TORCH_HOME=/workspace/WM/dit4dit/DiT4DiT_cache/torch
 export CONDA_PKGS_DIRS=/dev/shm/conda_cache/conda-pkgs
 export PIP_CACHE_DIR=/dev/shm/conda_cache/pip
 export XDG_CACHE_HOME=/dev/shm/conda_cache/xdg

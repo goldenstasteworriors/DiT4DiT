@@ -1,5 +1,5 @@
 run_id: pipette_right_wrist_delta_action_dit
-run_root_dir: /workspace/WM/DiT4DiT_runs
+run_root_dir: /workspace/WM/dit4dit/DiT4DiT_runs
 seed: 43
 trackers: [jsonl, wandb]
 wandb_entity: 2004kjy666-huazhong-university-of-science-and-technology
@@ -12,7 +12,7 @@ framework:
     future_num_inference_steps: 1
     future_loss_type: flow_matching
     extract_layer: 17
-    base_model: /workspace/WM/DiT4DiT_weights/Cosmos-Predict2.5-2B
+    base_model: /workspace/WM/dit4dit/DiT4DiT_weights/Cosmos-Predict2.5-2B
     attn_implementation: flash_attention_2
     vl_hidden_dim: 2048
     training: action
@@ -51,7 +51,7 @@ framework:
 datasets:
   vla_data:
     dataset_py: lerobot_datasets
-    data_root_dir: /workspace/WM/DiT4DiT_data/derived
+    data_root_dir: /workspace/WM/dit4dit/DiT4DiT_data/derived
     data_mix: pipette_right_wrist_delta
     include_state: true
     action_type: relative_wrist_pose
