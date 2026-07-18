@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT=/workspace/WM/DiT4DiT
 RUN_ROOT=/workspace/WM/DiT4DiT_runs
-PYTHON=/dev/shm/dit4dit_env/bin/python
+PYTHON=/dev/shm/conda_envs/dit4dit/bin/python
 ACCELERATE_CONFIG=DiT4DiT/config/deepseeds/deepspeed_zero2.yaml
 JOINT_GPUS=${JOINT_GPUS:-0,1}
 WRIST_GPUS=${WRIST_GPUS:-2,3}
@@ -21,9 +21,15 @@ export PYTHONNOUSERSITE=1
 export WANDB_MODE=offline
 export HF_HOME=/workspace/WM/DiT4DiT_cache/huggingface
 export TORCH_HOME=/workspace/WM/DiT4DiT_cache/torch
-export TRITON_CACHE_DIR=/dev/shm/dit4dit_triton_cache
+export CONDA_PKGS_DIRS=/dev/shm/conda_cache/conda-pkgs
+export PIP_CACHE_DIR=/dev/shm/conda_cache/pip
+export XDG_CACHE_HOME=/dev/shm/conda_cache/xdg
+export TMPDIR=/dev/shm/conda_cache/tmp
+export TRITON_CACHE_DIR=/dev/shm/conda_cache/triton/dit4dit
 export NCCL_TIMEOUT=10000
 export NCCL_SOCKET_TIMEOUT_MS=360000
+
+mkdir -p "${CONDA_PKGS_DIRS}" "${PIP_CACHE_DIR}" "${XDG_CACHE_HOME}" "${TMPDIR}" "${TRITON_CACHE_DIR}"
 
 CUDA_VISIBLE_DEVICES="${JOINT_GPUS}" nohup "${PYTHON}" -m accelerate.commands.launch \
   --config_file "${ACCELERATE_CONFIG}" \

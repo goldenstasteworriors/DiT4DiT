@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ARCHIVE=/workspace/WM/DiT4DiT_env/dit4dit_env.tar.gz
-RUNTIME=/dev/shm/dit4dit_env
+HELPER=/workspace/conda_envs/.tools/a800_conda_env.py
+RUNTIME=/dev/shm/conda_envs/dit4dit
 
-if [[ ! -f "${ARCHIVE}" ]]; then
-  echo "environment archive not found: ${ARCHIVE}" >&2
+if [[ ! -f "${HELPER}" ]]; then
+  echo "A800 Conda helper not found: ${HELPER}" >&2
   exit 1
 fi
 
-rm -rf "${RUNTIME}"
-mkdir -p "${RUNTIME}"
-tar -xzf "${ARCHIVE}" -C "${RUNTIME}"
+python "${HELPER}" status
+if [[ ! -x "${RUNTIME}/bin/python" ]]; then
+  python "${HELPER}" restore dit4dit
+fi
+python "${HELPER}" status
 "${RUNTIME}/bin/python" -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda, 'available', torch.cuda.is_available())"

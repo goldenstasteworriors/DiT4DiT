@@ -24,9 +24,10 @@ Launch both two-GPU runs:
 bash examples/PipetteRightOnly/launch_two_trainings.sh
 ```
 
-On A800_1, the persistent project, datasets, model weights, caches, runs, and packed environment
-are all under `/workspace/WM`. Because that mount is `noexec`, restore the packed environment to
-the executable RAM filesystem before launching:
+On A800_1, the persistent project, datasets, model weights, and runs are under `/workspace/WM`.
+The recoverable Conda snapshot is under `/workspace/conda_envs/dit4dit/current`, while the live
+environment uses `/dev/shm/conda_envs/dit4dit` according to the server policy. Restore and validate
+the environment before launching:
 
 ```bash
 bash examples/PipetteRightOnly/restore_a800_environment.sh
