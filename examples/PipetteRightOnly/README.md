@@ -4,7 +4,7 @@ This experiment is independent of the existing G1 real-robot pipelines. It uses 
 the right arm/right dexterous hand state, and one of two right-only action spaces:
 
 - `pipette_right_joints`: 7 right-arm joint commands + 6 right-hand commands.
-- `pipette_right_wrist_delta`: wrist-frame relative translation (3) + relative rotation 6D (6) + 6 right-hand commands. Both state and action wrist poses are relative transforms; state is `T[t-1]^-1 T[t]`, while action is `T[t]^-1 T[t+1]`.
+- `pipette_right_wrist_delta`: wrist-frame relative translation (3) + relative rotation 6D (6) + 6 right-hand commands. Stored state remains the absolute wrist pose; the dataloader converts it to `T[t-1]^-1 T[t]`, while action is `T[t]^-1 T[t+1]`.
 
 The Cosmos video backbone is frozen completely and the Action DiT is initialized randomly. No left-arm,
 lower-body, waist, root-state, motion-token, SMPL, or planner fields are included in the derived parquet files.

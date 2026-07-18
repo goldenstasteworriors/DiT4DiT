@@ -5,6 +5,8 @@
 
 from abc import ABC, abstractmethod
 
+import numpy as np
+
 from DiT4DiT.dataloader.gr00t_lerobot.datasets import ModalityConfig
 from DiT4DiT.dataloader.gr00t_lerobot.transform.base import ComposedModalityTransform, ModalityTransform
 from DiT4DiT.dataloader.gr00t_lerobot.transform.concat import ConcatTransform
@@ -34,6 +36,45 @@ class BaseDataConfig(ABC):
 
 
 ###########################################################################################
+
+
+class WristAbsoluteToRelativeTransform(ModalityTransform):
+    """Convert two absolute wrist poses into one local-frame relative pose."""
+
+    position_key: str
+    quaternion_key: str
+    passthrough_keys: list[str]
+
+    @staticmethod
+    def _quat_wxyz_to_matrix(quaternion: np.ndarray) -> np.ndarray:
+        quaternion = quaternion / np.linalg.norm(quaternion, axis=-1, keepdims=True).clip(1e-12)
+        w, x, y, z = np.moveaxis(quaternion, -1, 0)
+        return np.stack(
+            [
+                1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w),
+                2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w),
+                2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y),
+            ],
+            axis=-1,
+        ).reshape(-1, 3, 3)
+
+    def apply(self, data):
+        position = data[self.position_key]
+        quaternion = data[self.quaternion_key]
+        if position.shape != (2, 3) or quaternion.shape != (2, 4):
+            raise ValueError(
+                f"Expected two wrist poses, got position {position.shape}, quaternion {quaternion.shape}"
+            )
+
+        rotation = self._quat_wxyz_to_matrix(quaternion)
+        relative_position = rotation[0].T @ (position[1] - position[0])
+        relative_rotation = rotation[0].T @ rotation[1]
+        data[self.position_key] = relative_position[None].astype(np.float32)
+        data[self.quaternion_key] = relative_rotation[:2, :].reshape(1, 6).astype(np.float32)
+        for key in self.passthrough_keys:
+            data[key] = data[key][-1:]
+        return data
+
 
 class OxeDroidDataConfig:
     video_keys = [
@@ -1109,10 +1150,10 @@ class PipetteRightWristDeltaDataConfig(BaseDataConfig):
     """Right wrist relative SE(3) + dexterous-hand action representation."""
 
     video_keys = ["video.ego_view"]
-    state_keys = ["state.right_wrist_delta_pos", "state.right_wrist_delta_rot_6d", "state.right_hand"]
+    state_keys = ["state.right_wrist_pos", "state.right_wrist_abs_quat", "state.right_hand"]
     action_keys = ["action.right_wrist_delta_pos", "action.right_wrist_delta_rot_6d", "action.right_hand"]
     language_keys = ["annotation.human.task_description"]
-    observation_indices = [0]
+    observation_indices = [-1, 0]
     action_indices = list(range(16))
 
     def modality_config(self):
@@ -1125,11 +1166,13 @@ class PipetteRightWristDeltaDataConfig(BaseDataConfig):
 
     def transform(self):
         transforms = [
-            StateActionToTensor(apply_to=self.state_keys),
-            StateActionTransform(
+            WristAbsoluteToRelativeTransform(
                 apply_to=self.state_keys,
-                normalization_modes={key: "q99" for key in self.state_keys},
+                position_key="state.right_wrist_pos",
+                quaternion_key="state.right_wrist_abs_quat",
+                passthrough_keys=["state.right_hand"],
             ),
+            StateActionToTensor(apply_to=self.state_keys),
             StateActionToTensor(apply_to=self.action_keys),
             StateActionTransform(
                 apply_to=self.action_keys,

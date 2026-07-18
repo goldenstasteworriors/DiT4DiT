@@ -44,30 +44,13 @@ def derive_episode(frame: pd.DataFrame, representation: str) -> pd.DataFrame:
     pos = eef[:, RIGHT_WRIST_POS]
     quat = eef[:, RIGHT_WRIST_QUAT]
     rot = quat_wxyz_to_matrix(quat)
-
-    # State uses the motion that arrived at the current frame:
-    # T_{t-1}^{-1} T_t, expressed in the previous wrist frame.  This avoids
-    # leaking the robot/table placement through an absolute wrist pose and
-    # matches EgoHumanoid's local-frame delta EEF representation.
-    prev_pos = np.concatenate([pos[:1], pos[:-1]], axis=0)
-    prev_rot = np.concatenate([rot[:1], rot[:-1]], axis=0)
-    state_delta_pos = np.einsum(
-        "nij,nj->ni", np.transpose(prev_rot, (0, 2, 1)), pos - prev_pos
-    )
-    state_delta_rot = np.einsum(
-        "nij,njk->nik", np.transpose(prev_rot, (0, 2, 1)), rot
-    )
-    state_delta_rot_6d = state_delta_rot[:, :2, :].reshape(-1, 6)
-
     next_pos = np.concatenate([pos[1:], pos[-1:]], axis=0)
     next_rot = np.concatenate([rot[1:], rot[-1:]], axis=0)
     # T_current^-1 T_next: translation and rotation are expressed in the current wrist frame.
     delta_pos = np.einsum("nij,nj->ni", np.transpose(rot, (0, 2, 1)), next_pos - pos)
     delta_rot = np.einsum("nij,njk->nik", np.transpose(rot, (0, 2, 1)), next_rot)
     delta_rot_6d = delta_rot[:, :2, :].reshape(-1, 6)
-    result["observation.right_wrist_delta_hand"] = list(
-        np.concatenate([state_delta_pos, state_delta_rot_6d, obs[:, RIGHT_HAND]], -1).astype(np.float32)
-    )
+    result["observation.right_wrist_hand"] = list(np.concatenate([pos, quat, obs[:, RIGHT_HAND]], -1))
     result["action.right_wrist_delta_hand"] = list(
         np.concatenate([delta_pos, delta_rot_6d, wbc[:, RIGHT_HAND]], -1).astype(np.float32)
     )
@@ -90,14 +73,11 @@ def modality(representation: str) -> dict:
         }
     else:
         common["state"] = {
-            "right_wrist_delta_pos": {
-                "start": 0, "end": 3, "original_key": "observation.right_wrist_delta_hand", "absolute": False
+            "right_wrist_pos": {"start": 0, "end": 3, "original_key": "observation.right_wrist_hand"},
+            "right_wrist_abs_quat": {
+                "start": 3, "end": 7, "original_key": "observation.right_wrist_hand", "rotation_type": "quaternion"
             },
-            "right_wrist_delta_rot_6d": {
-                "start": 3, "end": 9, "original_key": "observation.right_wrist_delta_hand",
-                "rotation_type": "rotation_6d", "absolute": False,
-            },
-            "right_hand": {"start": 9, "end": 15, "original_key": "observation.right_wrist_delta_hand"},
+            "right_hand": {"start": 7, "end": 13, "original_key": "observation.right_wrist_hand"},
         }
         common["action"] = {
             "right_wrist_delta_pos": {
