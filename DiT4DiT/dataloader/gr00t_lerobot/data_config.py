@@ -1109,7 +1109,7 @@ class PipetteRightWristDeltaDataConfig(BaseDataConfig):
     """Right wrist relative SE(3) + dexterous-hand action representation."""
 
     video_keys = ["video.ego_view"]
-    state_keys = ["state.right_wrist_pos", "state.right_wrist_abs_quat", "state.right_hand"]
+    state_keys = ["state.right_wrist_delta_pos", "state.right_wrist_delta_rot_6d", "state.right_hand"]
     action_keys = ["action.right_wrist_delta_pos", "action.right_wrist_delta_rot_6d", "action.right_hand"]
     language_keys = ["annotation.human.task_description"]
     observation_indices = [0]
