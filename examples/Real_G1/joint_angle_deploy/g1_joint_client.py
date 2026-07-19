@@ -28,6 +28,7 @@ RIGHT_ARM_LOWER = np.array([-3.0892, -2.2515, -2.618, -1.0472, -1.9722, -1.6144,
 RIGHT_ARM_UPPER = np.array([2.6704, 1.5882, 2.618, 2.0944, 1.9722, 1.6144, 1.6144])
 # Median of frame 0 from the 19 pipette-right-joints training episodes.
 DEFAULT_INITIAL_RIGHT_ARM = np.array([-0.060281, -0.251992, -0.072517, -0.577184, 0.402035, 0.493582, -0.250482])
+DEFAULT_RIGHT_HAND_STATE = np.array([0.998, 1.0, 0.998, 0.998, 0.999, 0.984])
 
 
 def _pack_array(obj):
@@ -154,6 +155,13 @@ def main():
         metavar=("SP", "SR", "SY", "E", "WR", "WP", "WY"),
         help="right-arm deployment pose; default is the training-episode frame-0 median",
     )
+    parser.add_argument(
+        "--right-hand-state",
+        type=float,
+        nargs=6,
+        default=DEFAULT_RIGHT_HAND_STATE.tolist(),
+        help="right Inspire-hand state appended to the 7 arm joints for the 13-D model input",
+    )
     parser.add_argument("--timeout-ms", type=int, default=5000)
     parser.add_argument("--arm", action="store_true", help="actually publish rt/lowcmd")
     args = parser.parse_args()
@@ -170,6 +178,7 @@ def main():
     old_tty = termios.tcgetattr(sys.stdin)
     tty.setcbreak(sys.stdin.fileno())
     initial_pose = np.asarray(args.initial_right_arm, dtype=np.float64)
+    right_hand_state = np.asarray(args.right_hand_state, dtype=np.float64)
     if np.any(initial_pose < RIGHT_ARM_LOWER) or np.any(initial_pose > RIGHT_ARM_UPPER):
         raise SystemExit("initial-right-arm exceeds URDF joint limits")
     print(f"初始化目标关节角: {np.round(initial_pose, 4)}")
@@ -224,7 +233,8 @@ def main():
                 raise RuntimeError("camera frame unavailable")
             if len(cache) == 0:
                 image = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), (224, 224))
-                predicted = policy.predict(image, arm_q, args.instruction)
+                model_state = np.concatenate((arm_q, right_hand_state))
+                predicted = policy.predict(image, model_state, args.instruction)
                 if predicted.ndim != 2 or predicted.shape[1] != 13 or not np.isfinite(predicted).all():
                     raise RuntimeError(f"invalid policy output {predicted.shape}")
                 cache = predicted[: args.execution_horizon]
