@@ -93,6 +93,7 @@ protobuf==6.33.4
 psutil==7.2.1
 py-cpuinfo==9.0.0
 pyarrow==14.0.1
+pyzmq==27.1.0
 pydantic==2.10.6
 pydantic_core==2.27.2
 Pygments==2.19.2
