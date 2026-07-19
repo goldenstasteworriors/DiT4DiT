@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from pathlib import Path
 
 import cv2
@@ -60,6 +61,8 @@ def main():
     parser.add_argument("--action-dt", type=float, default=0.25, help="visual playback seconds per predicted step")
     parser.add_argument("--width", type=int, default=960)
     parser.add_argument("--height", type=int, default=720)
+    parser.add_argument("--viewer", action="store_true", help="open an interactive MuJoCo window instead of rendering MP4")
+    parser.add_argument("--loop", action="store_true", help="restart from the arms-down pose after the trajectory ends")
     args = parser.parse_args()
 
     record = json.loads(args.result.read_text())
@@ -79,6 +82,33 @@ def main():
             raise ValueError(f"Joint not found in MuJoCo model: {name}")
         qpos_indices.append(model.jnt_qposadr[joint_id])
 
+    timeline = build_timeline(actions, args.fps, args.init_seconds, args.action_dt)
+    if args.viewer:
+        import mujoco.viewer
+
+        with mujoco.viewer.launch_passive(model, data) as viewer:
+            viewer.cam.lookat[:] = [0.0, 0.0, 0.9]
+            viewer.cam.distance = 2.15
+            viewer.cam.azimuth = 150
+            viewer.cam.elevation = -12
+            print("MuJoCo viewer started. Close the window or press Ctrl-C to stop.")
+            while viewer.is_running():
+                for q, _ in timeline:
+                    if not viewer.is_running():
+                        break
+                    start = time.monotonic()
+                    data.qpos[qpos_indices] = q
+                    mujoco.mj_forward(model, data)
+                    viewer.sync()
+                    time.sleep(max(0.0, 1.0 / args.fps - (time.monotonic() - start)))
+                if not args.loop:
+                    break
+                data.qpos[qpos_indices] = 0.0
+                mujoco.mj_forward(model, data)
+                viewer.sync()
+                time.sleep(0.5)
+        return
+
     camera = mujoco.MjvCamera()
     camera.type = mujoco.mjtCamera.mjCAMERA_FREE
     camera.lookat[:] = [0.0, 0.0, 0.9]
@@ -93,7 +123,6 @@ def main():
     if not writer.isOpened():
         raise RuntimeError(f"Cannot open video writer: {args.output}")
 
-    timeline = build_timeline(actions, args.fps, args.init_seconds, args.action_dt)
     try:
         for frame_index, (q, phase) in enumerate(timeline):
             data.qpos[qpos_indices] = q
