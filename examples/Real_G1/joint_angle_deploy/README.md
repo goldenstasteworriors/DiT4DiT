@@ -2,7 +2,8 @@
 
 架构：A800_1 运行 DiT4DiT ZMQ 服务；连接 G1 DDS 网络的控制机运行客户端。当前
 `pipette_right_joints_action_dit` 模型输入/输出均为右臂 7 维与右 Inspire 手 6 维。客户端
-发布右臂到 `rt/arm_sdk`，并发布 12 维双手消息到 `rt/inspire/cmd`；右手使用模型输出，
+按 SONICMJ 的真机方式释放运动服务并发布 29 电机消息到 `rt/lowcmd`，同时发布 12 维
+双手消息到 `rt/inspire/cmd`；右手使用模型输出，
 左手保持 episode 0 的张开初态。`inspire_modbus_hand.py` 负责将 DDS 命令桥接到 Modbus。
 
 ## 1. A800_1 推理服务
@@ -27,8 +28,9 @@ python decoupled_wbc/scripts/inspire_modbus_hand.py --mode dds \
 
 ## 3. 先测试急停
 
-让 G1 使用吊架/可靠支撑，操作者手保持在键盘空格上。程序只让一个腕关节以 0.05 rad
-幅度、10 秒周期缓慢运动；启动后仍需按 Enter 才会下发。
+必须让 G1 使用可靠吊架，操作者手保持在键盘空格上。按 Enter 后程序会释放宇树运动
+服务并进入 `rt/lowcmd`；只让一个腕关节以 0.05 rad 幅度、10 秒周期缓慢运动。
+双臂使用位置 PD，双腿和腰默认只有速度阻尼，不具有主动站立和平衡能力。
 
 ```bash
 cd examples/Real_G1/joint_angle_deploy
@@ -49,7 +51,7 @@ python g1_joint_client.py --server <A800_1可达IP> --network-interface enp7s0 -
 
 真机启动顺序：
 
-1. 程序打印初始化目标关节角，按 Enter 才启用 `arm_sdk`。
+1. 程序打印初始化目标关节角，按 Enter 才释放运动服务并启用 `rt/lowcmd`。
 2. 右臂从 LowState 实测角出发，以 minimum-jerk 曲线移动至 episode 0 的精确初态
    `[0.010702, -0.233477, -0.072876, -0.584854, 0.365135, 0.419927, -0.250482]`；
    Inspire 手同步设为 `[0.998, 1, 0.998, 0.998, 0.999, 0.984]`（1 为张开）。
@@ -65,7 +67,10 @@ python g1_joint_client.py ... --arm \
   --initial-right-hand 0.998 1 0.998 0.998 0.999 0.984
 ```
 
-下发使用 Unitree 官方 `rt/arm_sdk` overlay，保留原有下肢控制器。安全逻辑包括：键盘
+下发参考 SONICMJ 的 `rt/lowcmd` 低层控制。右臂跟随模型，左臂保持进入低层控制时的
+实测姿态；双腿和腰默认使用纯速度阻尼（无位置目标、零前馈力矩），因此必须可靠吊挂。
+只有在确认机器人完全由吊架承重后，才可显式使用 `--lower-body-mode zero-torque`。
+安全逻辑包括：键盘
 急停锁存、Ctrl-C、低状态 200 ms 看门狗、推理 5 s 超时、NaN/形状检查、URDF 硬限位、
 0.25 rad/s 手臂速度限制、0.5/s 灵巧手归一化速度限制；任何异常都会切换为手臂实测
 位置保持与灵巧手最后命令保持。
