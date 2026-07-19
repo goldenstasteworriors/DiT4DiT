@@ -99,11 +99,25 @@ class G1DDS:
         self._hand_publisher.Init()
         self._subscriber = ChannelSubscriber("rt/lowstate", LowState_)
         self._subscriber.Init(self._on_state, 10)
+        self._wait_for_first_state(timeout=5.0)
 
     def _on_state(self, msg):
         with self._lock:
             self._q = np.array([motor.q for motor in msg.motor_state[:29]], dtype=np.float64)
             self._stamp = time.monotonic()
+
+    def _wait_for_first_state(self, timeout: float):
+        """Allow CycloneDDS discovery to finish before enabling the runtime watchdog."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self._lock:
+                if self._q is not None:
+                    return
+            time.sleep(0.01)
+        raise RuntimeError(
+            f"no rt/lowstate received within {timeout:.1f}s; "
+            "check G1 power/mode, DDS domain, and robot network interface"
+        )
 
     def state(self, max_age: float) -> np.ndarray:
         with self._lock:
