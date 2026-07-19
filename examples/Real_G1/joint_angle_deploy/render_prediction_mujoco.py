@@ -84,9 +84,9 @@ def main():
 
     timeline = build_timeline(actions, args.fps, args.init_seconds, args.action_dt)
     if args.viewer:
-        import mujoco.viewer
+        from mujoco import viewer as mj_viewer
 
-        with mujoco.viewer.launch_passive(model, data) as viewer:
+        with mj_viewer.launch_passive(model, data) as viewer:
             viewer.cam.lookat[:] = [0.0, 0.0, 0.9]
             viewer.cam.distance = 2.15
             viewer.cam.azimuth = 150
