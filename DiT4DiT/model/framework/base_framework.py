@@ -92,8 +92,21 @@ class baseframework(PreTrainedModel):
         # logger.info(f"Loading model weights from `{pretrained_checkpoint}`")
         model_keys = set(FrameworkModel.state_dict().keys())
         checkpoint_keys = set(model_state_dict.keys())
+        checkpoint_modules = getattr(model_config.trainer, "checkpoint_modules", "")
+        partial_checkpoint = bool(checkpoint_modules)
         try:
-            FrameworkModel.load_state_dict(model_state_dict, strict=True)
+            incompatible = FrameworkModel.load_state_dict(model_state_dict, strict=not partial_checkpoint)
+            if partial_checkpoint:
+                unexpected = set(incompatible.unexpected_keys)
+                if unexpected:
+                    raise RuntimeError(f"Unexpected keys in partial checkpoint: {sorted(unexpected)}")
+                loaded_keys = checkpoint_keys.intersection(model_keys)
+                if loaded_keys != checkpoint_keys:
+                    raise RuntimeError("Partial checkpoint contains keys absent from the configured model")
+                logger.info(
+                    f"Loaded partial checkpoint modules={checkpoint_modules!r}: "
+                    f"{len(loaded_keys)} tensors; base modules use configured pretrained weights"
+                )
         except RuntimeError as e:
             # must keep all keys matched
             common_keys = model_keys.intersection(checkpoint_keys)
@@ -192,7 +205,6 @@ class baseframework(PreTrainedModel):
         mask = action_norm_stats.get("mask", np.ones_like(action_norm_stats["q01"], dtype=bool))
         action_high, action_low = np.array(action_norm_stats["q99"]), np.array(action_norm_stats["q01"])
         normalized_actions = np.clip(normalized_actions, -1, 1)
-        normalized_actions[:, 6] = np.where(normalized_actions[:, 6] < 0.5, 0, 1)
         actions = np.where(
             mask,
             0.5 * (normalized_actions + 1) * (action_high - action_low) + action_low,
