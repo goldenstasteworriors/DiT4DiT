@@ -28,7 +28,9 @@ RIGHT_HAND_JOINTS = [
     "right_hand_thumb_rotate_joint",
     "right_hand_thumb_bend_joint",
 ]
-DEFAULT_INITIAL_RIGHT_ARM = np.array([-0.060281, -0.251992, -0.072517, -0.577184, 0.402035, 0.493582, -0.250482])
+DEFAULT_INITIAL_RIGHT_ARM = np.array(
+    [0.01070191, -0.23347668, -0.07287607, -0.58485419, 0.36513537, 0.41992724, -0.25048229]
+)
 DEFAULT_INITIAL_RIGHT_HAND = np.ones(6)
 
 

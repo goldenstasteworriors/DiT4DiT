@@ -26,9 +26,11 @@ RIGHT_ARM_MOTORS = np.arange(22, 29)
 LEFT_ARM_MOTORS = np.arange(15, 22)
 RIGHT_ARM_LOWER = np.array([-3.0892, -2.2515, -2.618, -1.0472, -1.9722, -1.6144, -1.6144])
 RIGHT_ARM_UPPER = np.array([2.6704, 1.5882, 2.618, 2.0944, 1.9722, 1.6144, 1.6144])
-# Median of frame 0 from the 19 pipette-right-joints training episodes.
-DEFAULT_INITIAL_RIGHT_ARM = np.array([-0.060281, -0.251992, -0.072517, -0.577184, 0.402035, 0.493582, -0.250482])
-DEFAULT_RIGHT_HAND_STATE = np.array([0.998, 1.0, 0.998, 0.998, 0.999, 0.984])
+# Exact state stored in training episode 0 (right arm 7 + Inspire right hand 6).
+DEFAULT_INITIAL_RIGHT_ARM = np.array(
+    [0.01070191, -0.23347668, -0.07287607, -0.58485419, 0.36513537, 0.41992724, -0.25048229]
+)
+DEFAULT_INITIAL_RIGHT_HAND = np.array([0.99800003, 1.0, 0.99800003, 0.99800003, 0.99900001, 0.98400003])
 
 
 def _pack_array(obj):
@@ -70,6 +72,8 @@ class G1DDS:
     def __init__(self, network_interface: str):
         from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelPublisher, ChannelSubscriber
         from unitree_sdk2py.idl.default import unitree_hg_msg_dds__LowCmd_
+        from unitree_sdk2py.idl.default import unitree_go_msg_dds__MotorCmd_
+        from unitree_sdk2py.idl.unitree_go.msg.dds_ import MotorCmds_
         from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowCmd_, LowState_
         from unitree_sdk2py.utils.crc import CRC
 
@@ -83,6 +87,9 @@ class G1DDS:
         # Publishing rt/lowcmd directly here could take over the legs as well.
         self._publisher = ChannelPublisher("rt/arm_sdk", LowCmd_)
         self._publisher.Init()
+        self._hand_cmd = MotorCmds_([unitree_go_msg_dds__MotorCmd_() for _ in range(12)])
+        self._hand_publisher = ChannelPublisher("rt/inspire/cmd", MotorCmds_)
+        self._hand_publisher.Init()
         self._subscriber = ChannelSubscriber("rt/lowstate", LowState_)
         self._subscriber.Init(self._on_state, 10)
 
@@ -108,6 +115,16 @@ class G1DDS:
             motor.kd = 1.0 if i in np.concatenate((LEFT_ARM_MOTORS[:4], RIGHT_ARM_MOTORS[:4])) else 0.5
         self._cmd.crc = self._crc.Crc(self._cmd)
         self._publisher.Write(self._cmd)
+
+    def send_inspire_hands(self, right_target: np.ndarray, left_target: np.ndarray):
+        """Publish normalized Inspire commands; bridge order is right 6 then left 6."""
+        right = np.clip(np.asarray(right_target, dtype=np.float64), 0.0, 1.0)
+        left = np.clip(np.asarray(left_target, dtype=np.float64), 0.0, 1.0)
+        if right.shape != (6,) or left.shape != (6,):
+            raise ValueError("Inspire hand targets must each contain 6 values")
+        for i, value in enumerate(np.concatenate((right, left))):
+            self._hand_cmd.cmds[i].q = float(value)
+        self._hand_publisher.Write(self._hand_cmd)
 
 
 class EStop:
@@ -144,6 +161,7 @@ def main():
     parser.add_argument("--frequency", type=float, default=10.0)
     parser.add_argument("--execution-horizon", type=int, default=4)
     parser.add_argument("--max-speed", type=float, default=0.25, help="rad/s")
+    parser.add_argument("--max-hand-speed", type=float, default=0.5, help="normalized Inspire units/s")
     parser.add_argument("--initial-speed", type=float, default=0.15, help="initialization speed limit in rad/s")
     parser.add_argument("--initial-duration", type=float, default=5.0, help="minimum initialization duration in seconds")
     parser.add_argument("--initial-tolerance", type=float, default=0.04, help="ready tolerance in rad")
@@ -153,14 +171,16 @@ def main():
         nargs=7,
         default=DEFAULT_INITIAL_RIGHT_ARM.tolist(),
         metavar=("SP", "SR", "SY", "E", "WR", "WP", "WY"),
-        help="right-arm deployment pose; default is the training-episode frame-0 median",
+        help="right-arm deployment pose; default is the exact episode-0 initial state",
     )
     parser.add_argument(
+        "--initial-right-hand",
         "--right-hand-state",
+        dest="initial_right_hand",
         type=float,
         nargs=6,
-        default=DEFAULT_RIGHT_HAND_STATE.tolist(),
-        help="right Inspire-hand state appended to the 7 arm joints for the 13-D model input",
+        default=DEFAULT_INITIAL_RIGHT_HAND.tolist(),
+        help="episode-0 Inspire-hand initial state and 13-D model input state",
     )
     parser.add_argument("--timeout-ms", type=int, default=5000)
     parser.add_argument("--arm", action="store_true", help="actually publish rt/lowcmd")
@@ -178,10 +198,13 @@ def main():
     old_tty = termios.tcgetattr(sys.stdin)
     tty.setcbreak(sys.stdin.fileno())
     initial_pose = np.asarray(args.initial_right_arm, dtype=np.float64)
-    right_hand_state = np.asarray(args.right_hand_state, dtype=np.float64)
+    right_hand_state = np.asarray(args.initial_right_hand, dtype=np.float64)
     if np.any(initial_pose < RIGHT_ARM_LOWER) or np.any(initial_pose > RIGHT_ARM_UPPER):
         raise SystemExit("initial-right-arm exceeds URDF joint limits")
+    if np.any(right_hand_state < 0.0) or np.any(right_hand_state > 1.0):
+        raise SystemExit("initial-right-hand must be normalized to [0, 1]")
     print(f"初始化目标关节角: {np.round(initial_pose, 4)}")
+    print(f"episode 0 Inspire 手初态: {np.round(right_hand_state, 4)}")
     print("SPACE/Q=急停；ENTER=开始抬臂初始化；到达 READY 后按 L 才启动模型。")
     enabled = False
     phase = "DRY_RUN" if not args.arm else "DISARMED"
@@ -189,6 +212,7 @@ def main():
     init_start_time = 0.0
     init_duration = args.initial_duration
     cache = np.empty((0, 13))
+    left_hand_hold = right_hand_state.copy()
     try:
         while not estop.latched:
             start = time.monotonic()
@@ -218,6 +242,7 @@ def main():
                 progress = (time.monotonic() - init_start_time) / init_duration
                 target = _minimum_jerk(init_start_q, initial_pose, progress)
                 robot.send_right_arm(target, measured)
+                robot.send_inspire_hands(right_hand_state, left_hand_hold)
                 if progress >= 1.0 and np.max(np.abs(arm_q - initial_pose)) <= args.initial_tolerance:
                     phase = "READY"
                     print("[READY] 初始化姿态已到位。检查现场安全后按 L 启动模型")
@@ -226,6 +251,7 @@ def main():
             if phase in ("DISARMED", "READY"):
                 if phase == "READY":
                     robot.send_right_arm(initial_pose, measured)
+                    robot.send_inspire_hands(right_hand_state, left_hand_hold)
                 time.sleep(max(0.0, period - (time.monotonic() - start)))
                 continue
             ok, frame = camera.read()
@@ -238,13 +264,18 @@ def main():
                 if predicted.ndim != 2 or predicted.shape[1] != 13 or not np.isfinite(predicted).all():
                     raise RuntimeError(f"invalid policy output {predicted.shape}")
                 cache = predicted[: args.execution_horizon]
-            desired, cache = cache[0, :7], cache[1:]
-            if np.any(desired < RIGHT_ARM_LOWER) or np.any(desired > RIGHT_ARM_UPPER):
+            desired_arm, desired_hand, cache = cache[0, :7], cache[0, 7:13], cache[1:]
+            if np.any(desired_arm < RIGHT_ARM_LOWER) or np.any(desired_arm > RIGHT_ARM_UPPER):
                 raise RuntimeError("policy target exceeds URDF joint limits")
+            if np.any(desired_hand < 0.0) or np.any(desired_hand > 1.0):
+                raise RuntimeError("policy Inspire target exceeds normalized limits")
             max_step = args.max_speed * period
-            target = arm_q + np.clip(desired - arm_q, -max_step, max_step)
+            target = arm_q + np.clip(desired_arm - arm_q, -max_step, max_step)
+            hand_max_step = args.max_hand_speed * period
+            right_hand_state += np.clip(desired_hand - right_hand_state, -hand_max_step, hand_max_step)
             if enabled:
                 robot.send_right_arm(target, measured)
+                robot.send_inspire_hands(right_hand_state, left_hand_hold)
             else:
                 print(f"\rdry-run q_target={np.round(target, 3)}", end="", flush=True)
             time.sleep(max(0.0, period - (time.monotonic() - start)))
@@ -256,6 +287,7 @@ def main():
                 measured = robot.state(0.2)
                 for _ in range(20):
                     robot.send_right_arm(measured[RIGHT_ARM_MOTORS], measured)
+                    robot.send_inspire_hands(right_hand_state, left_hand_hold)
                     time.sleep(0.01)
         finally:
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_tty)
