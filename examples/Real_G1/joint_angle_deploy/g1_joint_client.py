@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import select
 import signal
+import socket
 import sys
 import termios
 import threading
@@ -77,6 +78,12 @@ class G1DDS:
         from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowCmd_, LowState_
         from unitree_sdk2py.utils.crc import CRC
 
+        available_interfaces = {name for _, name in socket.if_nameindex()}
+        if network_interface not in available_interfaces:
+            available = ", ".join(sorted(available_interfaces))
+            raise ValueError(
+                f"network interface '{network_interface}' does not exist; available: {available}"
+            )
         ChannelFactoryInitialize(0, network_interface)
         self._cmd = unitree_hg_msg_dds__LowCmd_()
         self._crc = CRC()

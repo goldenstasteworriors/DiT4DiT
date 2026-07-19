@@ -20,7 +20,7 @@ cd /workspace/WM/dit4dit/DiT4DiT
 
 ```bash
 python decoupled_wbc/scripts/inspire_modbus_hand.py --mode dds \
-  --network enxdc045a1d933b --hand-task pick_up_pipette \
+  --network enp7s0 --hand-task pick_up_pipette \
   --hand-task-config gear_sonic/config/data_collection/inspire_hand_tasks.json \
   --profile-timing
 ```
@@ -32,7 +32,7 @@ python decoupled_wbc/scripts/inspire_modbus_hand.py --mode dds \
 
 ```bash
 cd examples/Real_G1/joint_angle_deploy
-python test_estop_slow.py --network-interface enp3s0
+python test_estop_slow.py --network-interface enp7s0
 ```
 
 按 Space 或 Q 后应立即停止轨迹并保持触发时的实测位置。测试通过后再运行模型客户端。
@@ -43,8 +43,8 @@ python test_estop_slow.py --network-interface enp3s0
 `--arm`，并在程序启动后按 Enter 二次解锁：
 
 ```bash
-python g1_joint_client.py --server <A800_1可达IP> --network-interface enxdc045a1d933b --camera 0
-python g1_joint_client.py --server <A800_1可达IP> --network-interface enxdc045a1d933b --camera 0 --arm
+python g1_joint_client.py --server <A800_1可达IP> --network-interface enp7s0 --camera 0
+python g1_joint_client.py --server <A800_1可达IP> --network-interface enp7s0 --camera 0 --arm
 ```
 
 真机启动顺序：
