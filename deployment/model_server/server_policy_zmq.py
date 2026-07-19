@@ -21,7 +21,7 @@ class UnnormalizedPolicyWrapper:
         self.action_norm_stats = action_norm_stats
         self.state_norm_stats = state_norm_stats
 
-    def normalize_state(self, state, max_state_dim=64):
+    def normalize_state(self, state, max_state_dim=None):
         """Apply the q01/q99 transform used by the real-G1 data pipeline."""
         state = np.asarray(state, dtype=np.float32)
         q01 = np.asarray(self.state_norm_stats["q01"], dtype=np.float32)
@@ -34,6 +34,10 @@ class UnnormalizedPolicyWrapper:
         normalized[..., mask] = 2.0 * (state[..., mask] - q01[mask]) / scale[mask] - 1.0
         state = np.clip(normalized, -1.0, 1.0)
 
+        if max_state_dim is None:
+            max_state_dim = int(self.policy.action_model.state_encoder.layer1.in_features)
+        if state.shape[1] > max_state_dim:
+            raise ValueError(f"normalized state has {state.shape[1]} values, model state_dim is {max_state_dim}")
         if state.shape[1] < max_state_dim:
             padding = np.zeros((1, max_state_dim - state.shape[1]), dtype=state.dtype)
             state = np.concatenate([state, padding], axis=-1)
