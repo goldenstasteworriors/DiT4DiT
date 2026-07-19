@@ -26,6 +26,8 @@ RIGHT_ARM_MOTORS = np.arange(22, 29)
 LEFT_ARM_MOTORS = np.arange(15, 22)
 RIGHT_ARM_LOWER = np.array([-3.0892, -2.2515, -2.618, -1.0472, -1.9722, -1.6144, -1.6144])
 RIGHT_ARM_UPPER = np.array([2.6704, 1.5882, 2.618, 2.0944, 1.9722, 1.6144, 1.6144])
+# Median of frame 0 from the 19 pipette-right-joints training episodes.
+DEFAULT_INITIAL_RIGHT_ARM = np.array([-0.060281, -0.251992, -0.072517, -0.577184, 0.402035, 0.493582, -0.250482])
 
 
 def _pack_array(obj):
@@ -124,6 +126,13 @@ def _read_key() -> str | None:
     return None
 
 
+def _minimum_jerk(start: np.ndarray, goal: np.ndarray, progress: float) -> np.ndarray:
+    """Zero-velocity/acceleration interpolation at both endpoints."""
+    x = float(np.clip(progress, 0.0, 1.0))
+    blend = 10.0 * x**3 - 15.0 * x**4 + 6.0 * x**5
+    return start + blend * (goal - start)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--server", required=True)
@@ -134,6 +143,17 @@ def main():
     parser.add_argument("--frequency", type=float, default=10.0)
     parser.add_argument("--execution-horizon", type=int, default=4)
     parser.add_argument("--max-speed", type=float, default=0.25, help="rad/s")
+    parser.add_argument("--initial-speed", type=float, default=0.15, help="initialization speed limit in rad/s")
+    parser.add_argument("--initial-duration", type=float, default=5.0, help="minimum initialization duration in seconds")
+    parser.add_argument("--initial-tolerance", type=float, default=0.04, help="ready tolerance in rad")
+    parser.add_argument(
+        "--initial-right-arm",
+        type=float,
+        nargs=7,
+        default=DEFAULT_INITIAL_RIGHT_ARM.tolist(),
+        metavar=("SP", "SR", "SY", "E", "WR", "WP", "WY"),
+        help="right-arm deployment pose; default is the training-episode frame-0 median",
+    )
     parser.add_argument("--timeout-ms", type=int, default=5000)
     parser.add_argument("--arm", action="store_true", help="actually publish rt/lowcmd")
     args = parser.parse_args()
@@ -149,8 +169,16 @@ def main():
     signal.signal(signal.SIGINT, lambda *_: estop.trigger("Ctrl-C"))
     old_tty = termios.tcgetattr(sys.stdin)
     tty.setcbreak(sys.stdin.fileno())
-    print("SPACE/Q=急停。默认 dry-run；--arm 模式下按 ENTER 二次解锁。")
+    initial_pose = np.asarray(args.initial_right_arm, dtype=np.float64)
+    if np.any(initial_pose < RIGHT_ARM_LOWER) or np.any(initial_pose > RIGHT_ARM_UPPER):
+        raise SystemExit("initial-right-arm exceeds URDF joint limits")
+    print(f"初始化目标关节角: {np.round(initial_pose, 4)}")
+    print("SPACE/Q=急停；ENTER=开始抬臂初始化；到达 READY 后按 L 才启动模型。")
     enabled = False
+    phase = "DRY_RUN" if not args.arm else "DISARMED"
+    init_start_q = None
+    init_start_time = 0.0
+    init_duration = args.initial_duration
     cache = np.empty((0, 13))
     try:
         while not estop.latched:
@@ -159,11 +187,38 @@ def main():
             if key in (" ", "q"):
                 estop.trigger("keyboard")
                 break
-            if key in ("\n", "\r") and args.arm:
+            if key in ("\n", "\r") and args.arm and phase == "DISARMED":
                 enabled = True
-                print("[ARMED] 已启用真机下发")
+                phase = "START_INITIALIZATION"
+                print("[ARMED] 已启用 arm_sdk，开始移动到初始化姿态")
+            if key == "l" and phase == "READY":
+                phase = "INFERENCE"
+                cache = np.empty((0, 13))
+                print("[INFERENCE] 模型已接管右臂")
             measured = robot.state(0.2)
             arm_q = measured[RIGHT_ARM_MOTORS]
+            if phase == "START_INITIALIZATION":
+                init_start_q = arm_q.copy()
+                init_start_time = time.monotonic()
+                # Minimum-jerk peak velocity is 1.875 * distance / duration.
+                speed_duration = 1.875 * float(np.max(np.abs(initial_pose - init_start_q))) / args.initial_speed
+                init_duration = max(args.initial_duration, speed_duration)
+                phase = "INITIALIZING"
+                print(f"[INITIALIZING] 预计 {init_duration:.1f}s；插值期间 SPACE/Q 同样有效")
+            if phase == "INITIALIZING":
+                progress = (time.monotonic() - init_start_time) / init_duration
+                target = _minimum_jerk(init_start_q, initial_pose, progress)
+                robot.send_right_arm(target, measured)
+                if progress >= 1.0 and np.max(np.abs(arm_q - initial_pose)) <= args.initial_tolerance:
+                    phase = "READY"
+                    print("[READY] 初始化姿态已到位。检查现场安全后按 L 启动模型")
+                time.sleep(max(0.0, period - (time.monotonic() - start)))
+                continue
+            if phase in ("DISARMED", "READY"):
+                if phase == "READY":
+                    robot.send_right_arm(initial_pose, measured)
+                time.sleep(max(0.0, period - (time.monotonic() - start)))
+                continue
             ok, frame = camera.read()
             if not ok:
                 raise RuntimeError("camera frame unavailable")
