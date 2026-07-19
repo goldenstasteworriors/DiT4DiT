@@ -8,7 +8,7 @@
 
 ```bash
 cd /workspace/WM/dit4dit/DiT4DiT
-/dev/shm/conda_envs/DiT4DiT_env/bin/python deployment/model_server/server_policy_zmq.py \
+/dev/shm/conda_envs/dit4dit/bin/python deployment/model_server/server_policy_zmq.py \
   --ckpt_path /workspace/WM/dit4dit/DiT4DiT_runs/pipette_right_joints_action_dit/checkpoints/steps_48000_pytorch_model.pt \
   --port 5556 --use_bf16
 ```
