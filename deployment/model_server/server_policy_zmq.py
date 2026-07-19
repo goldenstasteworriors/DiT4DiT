@@ -22,10 +22,17 @@ class UnnormalizedPolicyWrapper:
         self.state_norm_stats = state_norm_stats
 
     def normalize_state(self, state, max_state_dim=64):
-        # Apply SinCosTransform: concat([sin(state), cos(state)])
-        sin_val = np.sin(state)
-        cos_val = np.cos(state)
-        state = np.concatenate([sin_val, cos_val], axis=-1)
+        """Apply the q01/q99 transform used by the real-G1 data pipeline."""
+        state = np.asarray(state, dtype=np.float32)
+        q01 = np.asarray(self.state_norm_stats["q01"], dtype=np.float32)
+        q99 = np.asarray(self.state_norm_stats["q99"], dtype=np.float32)
+        if state.shape[-1] != q01.size:
+            raise ValueError(f"state has {state.shape[-1]} values, checkpoint expects {q01.size}")
+        scale = q99 - q01
+        mask = np.abs(scale) > 1e-8
+        normalized = state.copy()
+        normalized[..., mask] = 2.0 * (state[..., mask] - q01[mask]) / scale[mask] - 1.0
+        state = np.clip(normalized, -1.0, 1.0)
 
         if state.shape[1] < max_state_dim:
             padding = np.zeros((1, max_state_dim - state.shape[1]), dtype=state.dtype)
@@ -42,9 +49,8 @@ class UnnormalizedPolicyWrapper:
 
         output = self.policy.predict_action(**kwargs)
         normalized_actions = output["normalized_actions"][0]  # [T, D]
-        normalized_actions = normalized_actions[
-            : self.policy.action_model.action_horizon, :23
-        ]
+        action_dim = len(self.action_norm_stats["q01"])
+        normalized_actions = normalized_actions[: self.policy.action_model.action_horizon, :action_dim]
         unnormalized_actions = baseframework.unnormalize_actions(
             normalized_actions, self.action_norm_stats
         )
