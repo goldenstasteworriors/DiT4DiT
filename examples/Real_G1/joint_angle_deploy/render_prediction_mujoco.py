@@ -4,10 +4,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import sys
 import time
 from pathlib import Path
 
 import cv2
+
+if "--viewer" in sys.argv and os.environ.get("MUJOCO_GL", "").lower() in {"egl", "osmesa"}:
+    print("[viewer] ignoring headless MUJOCO_GL; using the windowed GLFW backend", file=sys.stderr)
+    os.environ.pop("MUJOCO_GL", None)
+
 import mujoco
 import numpy as np
 
@@ -145,33 +152,36 @@ def main():
     if args.viewer:
         from mujoco import viewer as mj_viewer
 
-        with mj_viewer.launch_passive(model, data) as viewer:
-            viewer.cam.lookat[:] = [0.0, 0.0, 0.9]
-            viewer.cam.distance = 2.15
-            viewer.cam.azimuth = 150
-            viewer.cam.elevation = -12
-            print("MuJoCo viewer started. Close the window or press Ctrl-C to stop.")
-            while viewer.is_running():
-                previous_phase = None
-                for arm_q, hand_q, phase in timeline:
-                    if not viewer.is_running():
+        try:
+            with mj_viewer.launch_passive(model, data) as viewer:
+                viewer.cam.lookat[:] = [0.0, 0.0, 0.9]
+                viewer.cam.distance = 2.15
+                viewer.cam.azimuth = 150
+                viewer.cam.elevation = -12
+                print("MuJoCo viewer started. Close the window or press Ctrl-C to stop.")
+                while viewer.is_running():
+                    previous_phase = None
+                    for arm_q, hand_q, phase in timeline:
+                        if not viewer.is_running():
+                            break
+                        start = time.monotonic()
+                        data.qpos[arm_qpos_indices] = arm_q
+                        data.qpos[hand_qpos_indices] = inspire_dds_to_mujoco(hand_q)
+                        mujoco.mj_forward(model, data)
+                        viewer.sync()
+                        if phase != previous_phase:
+                            print(f"{phase} | right hand DDS [L R M I TB TR]: " + " ".join(f"{x:.3f}" for x in hand_q))
+                            previous_phase = phase
+                        time.sleep(max(0.0, 1.0 / args.fps - (time.monotonic() - start)))
+                    if not args.loop:
                         break
-                    start = time.monotonic()
-                    data.qpos[arm_qpos_indices] = arm_q
-                    data.qpos[hand_qpos_indices] = inspire_dds_to_mujoco(hand_q)
+                    data.qpos[arm_qpos_indices] = 0.0
+                    data.qpos[hand_qpos_indices] = inspire_dds_to_mujoco(initial_hand)
                     mujoco.mj_forward(model, data)
                     viewer.sync()
-                    if phase != previous_phase:
-                        print(f"{phase} | right hand DDS [L R M I TB TR]: " + " ".join(f"{x:.3f}" for x in hand_q))
-                        previous_phase = phase
-                    time.sleep(max(0.0, 1.0 / args.fps - (time.monotonic() - start)))
-                if not args.loop:
-                    break
-                data.qpos[arm_qpos_indices] = 0.0
-                data.qpos[hand_qpos_indices] = inspire_dds_to_mujoco(initial_hand)
-                mujoco.mj_forward(model, data)
-                viewer.sync()
-                time.sleep(0.5)
+                    time.sleep(0.5)
+        except KeyboardInterrupt:
+            print("\nviewer interrupted by Ctrl-C")
         return
 
     camera = mujoco.MjvCamera()

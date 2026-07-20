@@ -9,10 +9,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import sys
 import time
 from pathlib import Path
 
 import imageio.v2 as imageio
+
+# EGL/OSMesa are off-screen backends and cannot safely own a GLFW/X11 viewer.
+# Do this before importing mujoco because MUJOCO_GL is read during import.
+if "--viewer" in sys.argv and os.environ.get("MUJOCO_GL", "").lower() in {"egl", "osmesa"}:
+    print("[viewer] ignoring headless MUJOCO_GL; using the windowed GLFW backend", file=sys.stderr)
+    os.environ.pop("MUJOCO_GL", None)
+
 import mujoco
 import numpy as np
 import pandas as pd
@@ -228,23 +237,26 @@ def main() -> None:
     if args.viewer:
         from mujoco import viewer as mj_viewer
 
-        with mj_viewer.launch_passive(model, data) as viewer:
-            viewer.cam.lookat[:] = [0.0, 0.0, 0.9]
-            viewer.cam.distance = 2.15
-            viewer.cam.azimuth = 150
-            viewer.cam.elevation = -12
-            started = time.monotonic()
-            while viewer.is_running():
-                elapsed = (time.monotonic() - started) * args.speed
-                index = min(int(np.searchsorted(timestamps - timestamps[0], elapsed)), len(samples) - 1)
-                set_pose(
-                    data, samples[index], body_indices, left_hand_indices, right_hand_indices, not args.no_hands
-                )
-                mujoco.mj_forward(model, data)
-                viewer.sync()
-                if index == len(samples) - 1:
-                    break
-                time.sleep(1.0 / args.fps)
+        try:
+            with mj_viewer.launch_passive(model, data) as viewer:
+                viewer.cam.lookat[:] = [0.0, 0.0, 0.9]
+                viewer.cam.distance = 2.15
+                viewer.cam.azimuth = 150
+                viewer.cam.elevation = -12
+                started = time.monotonic()
+                while viewer.is_running():
+                    elapsed = (time.monotonic() - started) * args.speed
+                    index = min(int(np.searchsorted(timestamps - timestamps[0], elapsed)), len(samples) - 1)
+                    set_pose(
+                        data, samples[index], body_indices, left_hand_indices, right_hand_indices, not args.no_hands
+                    )
+                    mujoco.mj_forward(model, data)
+                    viewer.sync()
+                    if index == len(samples) - 1:
+                        break
+                    time.sleep(1.0 / args.fps)
+        except KeyboardInterrupt:
+            print("\nviewer interrupted by Ctrl-C")
         return
 
     camera = mujoco.MjvCamera()

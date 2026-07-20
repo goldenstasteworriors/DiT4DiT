@@ -3,10 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import os
+import sys
 import time
 from pathlib import Path
 
 import cv2
+
+if "--viewer" in sys.argv and os.environ.get("MUJOCO_GL", "").lower() in {"egl", "osmesa"}:
+    print("[viewer] ignoring headless MUJOCO_GL; using the windowed GLFW backend", file=sys.stderr)
+    os.environ.pop("MUJOCO_GL", None)
+
 import mujoco
 import numpy as np
 
@@ -148,19 +155,22 @@ def main() -> None:
     if args.viewer:
         from mujoco import viewer as mj_viewer
 
-        with mj_viewer.launch_passive(model, data) as viewer:
-            viewer.cam.lookat[:] = [0.0, 0.0, 0.9]
-            viewer.cam.distance = 2.15
-            viewer.cam.azimuth = 150
-            viewer.cam.elevation = -12
-            for pose, _, _ in timeline:
-                if not viewer.is_running():
-                    break
-                started = time.monotonic()
-                data.qpos[qpos_indices] = pose
-                mujoco.mj_forward(model, data)
-                viewer.sync()
-                time.sleep(max(0.0, 1.0 / args.fps - (time.monotonic() - started)))
+        try:
+            with mj_viewer.launch_passive(model, data) as viewer:
+                viewer.cam.lookat[:] = [0.0, 0.0, 0.9]
+                viewer.cam.distance = 2.15
+                viewer.cam.azimuth = 150
+                viewer.cam.elevation = -12
+                for pose, _, _ in timeline:
+                    if not viewer.is_running():
+                        break
+                    started = time.monotonic()
+                    data.qpos[qpos_indices] = pose
+                    mujoco.mj_forward(model, data)
+                    viewer.sync()
+                    time.sleep(max(0.0, 1.0 / args.fps - (time.monotonic() - started)))
+        except KeyboardInterrupt:
+            print("\nviewer interrupted by Ctrl-C")
         return
 
     camera = mujoco.MjvCamera()

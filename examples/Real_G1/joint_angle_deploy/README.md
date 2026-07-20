@@ -180,3 +180,5 @@ python examples/Real_G1/joint_angle_deploy/render_full_trajectory_mujoco.py --vi
 
 添加 `--source action` 可改为回放当时的 `action.wbc`，添加 `--viewer` 可使用交互窗口。
 该脚本会严格检查旧格式 `modality.json` 的41维布局，不会猜测或自动兼容后续新格式。
+`--viewer` 使用 GLFW/X11 窗口后端；即使命令行误设了 `MUJOCO_GL=egl` 或 `osmesa`，
+脚本也会在导入 MuJoCo 前自动忽略该离屏设置。导出 MP4 时仍可使用 `MUJOCO_GL=egl`。
