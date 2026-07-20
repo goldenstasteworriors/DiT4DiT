@@ -14,7 +14,6 @@
 # limitations under the License.
 
 
-import av
 import cv2
 import numpy as np
 
@@ -217,6 +216,8 @@ def get_all_frames(
         frames = decoder.get_frames_at(indices=range(len(decoder)))
         return frames.data.numpy(), frames.pts_seconds.numpy()
     elif video_backend == "pyav":
+        import av
+
         container = av.open(video_path)
         frames = []
         for frame in container.decode(video=0):
