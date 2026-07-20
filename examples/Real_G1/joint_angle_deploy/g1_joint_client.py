@@ -131,36 +131,45 @@ class CameraStream:
 
     def _run(self):
         visible_phases = {"DRY_RUN", "READY", "INFERENCE"}
-        while not self._stop.is_set():
-            ok, frame = self._capture.read()
-            if not ok:
+        try:
+            while not self._stop.is_set():
+                ok, frame = self._capture.read()
+                if not ok:
+                    raise RuntimeError("camera frame unavailable")
                 with self._lock:
-                    self._error = "camera frame unavailable"
-                return
-            with self._lock:
-                self._frame = frame
-                phase = self._phase
-            if self._show and phase in visible_phases:
-                preview = frame.copy()
-                cv2.rectangle(preview, (12, 10), (preview.shape[1] - 12, 68), (0, 0, 0), -1)
-                cv2.putText(preview, f"G1 CAMERA | {phase}", (24, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (80, 220, 255), 2)
-                cv2.putText(preview, "L: inference   SPACE/Q: E-STOP", (24, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (230, 230, 230), 1)
-                cv2.imshow("G1 Deployment Camera", preview)
-                code = cv2.waitKey(1) & 0xFF
-                if code != 0xFF:
-                    with self._lock:
-                        self._key = chr(code).lower()
+                    self._frame = frame
+                    phase = self._phase
+                if self._show and phase in visible_phases:
+                    preview = frame.copy()
+                    cv2.rectangle(preview, (12, 10), (preview.shape[1] - 12, 68), (0, 0, 0), -1)
+                    cv2.putText(preview, f"G1 CAMERA | {phase}", (24, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (80, 220, 255), 2)
+                    cv2.putText(preview, "L: inference   SPACE/Q: E-STOP", (24, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (230, 230, 230), 1)
+                    cv2.imshow("G1 Deployment Camera", preview)
+                    code = cv2.waitKey(1) & 0xFF
+                    if code != 0xFF:
+                        with self._lock:
+                            self._key = chr(code).lower()
+        except Exception as exc:
+            if not self._stop.is_set():
+                message = f"camera/display thread failed: {exc}"
+                print(f"\n[CAMERA ERROR] {message}", flush=True)
+                with self._lock:
+                    self._error = message
+
+    def _raise_camera_error(self):
+        if self._error is not None:
+            raise RuntimeError(self._error)
 
     def frame(self) -> np.ndarray:
         with self._lock:
-            if self._error is not None:
-                raise RuntimeError(self._error)
+            self._raise_camera_error()
             if self._frame is None:
                 raise RuntimeError("camera frame unavailable")
             return self._frame.copy()
 
     def read_key(self) -> str | None:
         with self._lock:
+            self._raise_camera_error()
             key, self._key = self._key, None
             return key
 

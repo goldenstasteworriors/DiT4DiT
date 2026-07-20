@@ -68,6 +68,9 @@ python g1_joint_client.py --server <A800_1可达IP> --network-interface enp7s0 -
 添加 `--view-camera` 后，dry-run 会立即打开 PC 实时相机窗口；正式部署则在初始化完成、
 进入 `READY` 后自动打开。相机采集与显示在独立线程中，A800 推理期间画面仍持续刷新。
 窗口获得焦点时可按 `L` 开始推理，按 Space/Q 急停；终端快捷键同时有效。
+如果 `cv2.getBuildInformation()` 显示 `GUI: NONE`，说明 `opencv-python-headless` 覆盖了
+GUI 绑定；需在 `decoupled_vla_collection` 环境中安装与当前 OpenCV 同版本的
+`opencv-python`。相机/显示线程异常会回传主循环，并进入既有的安全保持流程。
 
 默认初始化至少 5 秒且峰值速度不超过 0.15 rad/s。可以显式指定其它训练匹配姿态：
 
