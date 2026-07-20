@@ -2,7 +2,7 @@ run_id: pipette_right_joints_action_dit
 run_root_dir: /workspace/WM/dit4dit/DiT4DiT_runs
 seed: 42
 trackers: [jsonl, wandb]
-wandb_entity: 2004kjy666-huazhong-university-of-science-and-technology
+wandb_entity: ttyyc-hust
 wandb_project: DiT4DiT_Pipette_RightOnly
 is_debug: false
 
