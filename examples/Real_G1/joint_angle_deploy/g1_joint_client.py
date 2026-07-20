@@ -36,18 +36,12 @@ LEFT_ARM_LOWER = np.array([-3.0892, -1.5882, -2.618, -1.0472, -1.9722, -1.6144, 
 LEFT_ARM_UPPER = np.array([2.6704, 2.2515, 2.618, 2.0944, 1.9722, 1.6144, 1.6144])
 RIGHT_ARM_LOWER = np.array([-3.0892, -2.2515, -2.618, -1.0472, -1.9722, -1.6144, -1.6144])
 RIGHT_ARM_UPPER = np.array([2.6704, 1.5882, 2.618, 2.0944, 1.9722, 1.6144, 1.6144])
-# Exact frame-0 measured state and WBC command from the original training episode 0.
+# Exact frame-0 observation.state from the original training episode 0.
 DEFAULT_INITIAL_LEFT_ARM = np.array(
     [0.12029766, 0.16296150, 0.46878693, -0.27993950, -0.15619041, 0.07666309, -0.24765402]
 )
-DEFAULT_INITIAL_LEFT_ARM_COMMAND = np.array(
-    [0.09455067, 0.19000100, 0.49099584, -0.40917941, -0.18749985, -0.04786249, -0.24986003]
-)
 DEFAULT_INITIAL_RIGHT_ARM = np.array(
     [0.01070191, -0.23347668, -0.07287607, -0.58485419, 0.36513537, 0.41992724, -0.25048229]
-)
-DEFAULT_INITIAL_RIGHT_ARM_COMMAND = np.array(
-    [-0.02390268, -0.25239882, -0.10531295, -0.68503897, 0.37852132, 0.35675876, -0.25101347]
 )
 DEFAULT_INITIAL_RIGHT_HAND = np.array([0.99800003, 1.0, 0.99800003, 0.99800003, 0.99900001, 0.98400003])
 
@@ -395,6 +389,18 @@ def main():
     parser.add_argument("--initial-duration", type=float, default=5.0, help="minimum initialization duration in seconds")
     parser.add_argument("--initial-tolerance", type=float, default=0.02, help="per-joint READY tolerance in rad")
     parser.add_argument(
+        "--initial-correction-rate",
+        type=float,
+        default=0.5,
+        help="post-interpolation outer-loop correction rate in 1/s",
+    )
+    parser.add_argument(
+        "--initial-correction-limit",
+        type=float,
+        default=0.05,
+        help="maximum outer-loop position offset per joint in rad",
+    )
+    parser.add_argument(
         "--initial-left-arm",
         type=float,
         nargs=7,
@@ -409,22 +415,6 @@ def main():
         default=DEFAULT_INITIAL_RIGHT_ARM.tolist(),
         metavar=("SP", "SR", "SY", "E", "WR", "WP", "WY"),
         help="right-arm deployment pose; default is the exact episode-0 initial state",
-    )
-    parser.add_argument(
-        "--initial-left-arm-command",
-        type=float,
-        nargs=7,
-        default=DEFAULT_INITIAL_LEFT_ARM_COMMAND.tolist(),
-        metavar=("SP", "SR", "SY", "E", "WR", "WP", "WY"),
-        help="episode-0 action.wbc command that maintains --initial-left-arm",
-    )
-    parser.add_argument(
-        "--initial-right-arm-command",
-        type=float,
-        nargs=7,
-        default=DEFAULT_INITIAL_RIGHT_ARM_COMMAND.tolist(),
-        metavar=("SP", "SR", "SY", "E", "WR", "WP", "WY"),
-        help="episode-0 action.wbc command that maintains --initial-right-arm",
     )
     parser.add_argument(
         "--initial-right-hand",
@@ -455,23 +445,17 @@ def main():
     tty.setcbreak(sys.stdin.fileno())
     initial_left_pose = np.asarray(args.initial_left_arm, dtype=np.float64)
     initial_pose = np.asarray(args.initial_right_arm, dtype=np.float64)
-    initial_left_command = np.asarray(args.initial_left_arm_command, dtype=np.float64)
-    initial_command = np.asarray(args.initial_right_arm_command, dtype=np.float64)
     right_hand_state = np.asarray(args.initial_right_hand, dtype=np.float64)
     if np.any(initial_left_pose < LEFT_ARM_LOWER) or np.any(initial_left_pose > LEFT_ARM_UPPER):
         raise SystemExit("initial-left-arm exceeds URDF joint limits")
     if np.any(initial_pose < RIGHT_ARM_LOWER) or np.any(initial_pose > RIGHT_ARM_UPPER):
         raise SystemExit("initial-right-arm exceeds URDF joint limits")
-    if np.any(initial_left_command < LEFT_ARM_LOWER) or np.any(initial_left_command > LEFT_ARM_UPPER):
-        raise SystemExit("initial-left-arm-command exceeds URDF joint limits")
-    if np.any(initial_command < RIGHT_ARM_LOWER) or np.any(initial_command > RIGHT_ARM_UPPER):
-        raise SystemExit("initial-right-arm-command exceeds URDF joint limits")
+    if args.initial_correction_rate < 0.0 or args.initial_correction_limit < 0.0:
+        raise SystemExit("initial correction rate/limit must be non-negative")
     if np.any(right_hand_state < 0.0) or np.any(right_hand_state > 1.0):
         raise SystemExit("initial-right-hand must be normalized to [0, 1]")
     print(f"初始化目标关节角: {np.round(initial_pose, 4)}")
     print(f"episode 0 左臂初态: {np.round(initial_left_pose, 4)}")
-    print(f"episode 0 左臂 WBC 命令: {np.round(initial_left_command, 4)}")
-    print(f"episode 0 右臂 WBC 命令: {np.round(initial_command, 4)}")
     print(f"episode 0 Inspire 手初态: {np.round(right_hand_state, 4)}")
     print("SPACE/Q=急停；ENTER=开始抬臂初始化；到达 READY 后按 L 才启动模型。")
     enabled = False
@@ -482,6 +466,8 @@ def main():
     init_start_time = 0.0
     init_duration = args.initial_duration
     last_init_status_time = 0.0
+    left_init_correction = np.zeros(7, dtype=np.float64)
+    right_init_correction = np.zeros(7, dtype=np.float64)
     cache = np.empty((0, 13))
     left_hand_hold = right_hand_state.copy()
     try:
@@ -512,8 +498,8 @@ def main():
                 init_start_time = time.monotonic()
                 # Minimum-jerk peak velocity is 1.875 * distance / duration.
                 max_distance = max(
-                    float(np.max(np.abs(initial_command - init_start_q))),
-                    float(np.max(np.abs(initial_left_command - init_start_left_q))),
+                    float(np.max(np.abs(initial_pose - init_start_q))),
+                    float(np.max(np.abs(initial_left_pose - init_start_left_q))),
                 )
                 speed_duration = 1.875 * max_distance / args.initial_speed
                 init_duration = max(args.initial_duration, speed_duration)
@@ -522,13 +508,27 @@ def main():
                 print(f"[INITIALIZING] 预计 {init_duration:.1f}s；插值期间 SPACE/Q 同样有效")
             if phase == "INITIALIZING":
                 progress = (time.monotonic() - init_start_time) / init_duration
-                target = _minimum_jerk(init_start_q, initial_command, progress)
-                left_target = _minimum_jerk(init_start_left_q, initial_left_command, progress)
-                robot.send_arms(left_target, target)
-                robot.send_inspire_hands(right_hand_state, left_hand_hold)
+                target = _minimum_jerk(init_start_q, initial_pose, progress)
+                left_target = _minimum_jerk(init_start_left_q, initial_left_pose, progress)
                 if progress >= 1.0:
                     left_error = initial_left_pose - left_arm_q
                     right_error = initial_pose - arm_q
+                    correction_step = args.initial_correction_rate * period
+                    left_init_correction = np.clip(
+                        left_init_correction + correction_step * left_error,
+                        -args.initial_correction_limit,
+                        args.initial_correction_limit,
+                    )
+                    right_init_correction = np.clip(
+                        right_init_correction + correction_step * right_error,
+                        -args.initial_correction_limit,
+                        args.initial_correction_limit,
+                    )
+                    left_target = np.clip(initial_left_pose + left_init_correction, LEFT_ARM_LOWER, LEFT_ARM_UPPER)
+                    target = np.clip(initial_pose + right_init_correction, RIGHT_ARM_LOWER, RIGHT_ARM_UPPER)
+                robot.send_arms(left_target, target)
+                robot.send_inspire_hands(right_hand_state, left_hand_hold)
+                if progress >= 1.0:
                     max_error = max(float(np.max(np.abs(left_error))), float(np.max(np.abs(right_error))))
                     now = time.monotonic()
                     if max_error <= args.initial_tolerance:
@@ -549,14 +549,30 @@ def main():
                         print(
                             f"[INITIALIZING] waiting for both arms, max_error={max_error:.4f} rad | "
                             f"L-wrist err={np.round(left_error[4:7], 4)} | "
-                            f"R-wrist err={np.round(right_error[4:7], 4)}"
+                            f"R-wrist err={np.round(right_error[4:7], 4)} | "
+                            f"correction_max={max(np.max(np.abs(left_init_correction)), np.max(np.abs(right_init_correction))):.4f} rad"
                         )
                         last_init_status_time = now
                 time.sleep(max(0.0, period - (time.monotonic() - start)))
                 continue
             if phase in ("DISARMED", "READY"):
                 if phase == "READY":
-                    robot.send_arms(initial_left_command, initial_command)
+                    left_error = initial_left_pose - left_arm_q
+                    right_error = initial_pose - arm_q
+                    correction_step = args.initial_correction_rate * period
+                    left_init_correction = np.clip(
+                        left_init_correction + correction_step * left_error,
+                        -args.initial_correction_limit,
+                        args.initial_correction_limit,
+                    )
+                    right_init_correction = np.clip(
+                        right_init_correction + correction_step * right_error,
+                        -args.initial_correction_limit,
+                        args.initial_correction_limit,
+                    )
+                    left_hold = np.clip(initial_left_pose + left_init_correction, LEFT_ARM_LOWER, LEFT_ARM_UPPER)
+                    right_hold = np.clip(initial_pose + right_init_correction, RIGHT_ARM_LOWER, RIGHT_ARM_UPPER)
+                    robot.send_arms(left_hold, right_hold)
                     robot.send_inspire_hands(right_hand_state, left_hand_hold)
                 time.sleep(max(0.0, period - (time.monotonic() - start)))
                 continue
