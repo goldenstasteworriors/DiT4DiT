@@ -5,6 +5,8 @@
 按 SONICMJ 的真机方式释放运动服务并发布 29 电机消息到 `rt/lowcmd`，同时发布 12 维
 双手消息到 `rt/inspire/cmd`；右手使用模型输出，
 左手保持 episode 0 的张开初态。`inspire_modbus_hand.py` 负责将 DDS 命令桥接到 Modbus。
+客户端同时订阅 bridge 发布的 `rt/inspire/state`，READY 判定和模型状态输入使用手指实测值，
+而不是上一次下发的命令值。
 
 ## 1. A800_1 推理服务
 
@@ -26,7 +28,24 @@ python decoupled_wbc/scripts/inspire_modbus_hand.py --mode dds \
   --profile-timing
 ```
 
-## 3. 先测试急停
+## 3. 启动机器人相机服务
+
+在机器人 `192.168.123.164` 上启动采集时使用的 SONIC 相机服务：
+
+```bash
+cd <机器人上的GR00T-WholeBodyControl目录>
+source .venv_camera/bin/activate
+python -m gear_sonic.camera.composed_camera \
+  --ego-view-camera oak \
+  --port 5555
+```
+
+如果机器人的 OAK 相机需要指定 MxID，再增加
+`--ego-view-device-id <EGO_MXID>`。在控制机上用 `nc -vz 192.168.123.164 5555` 确认端口
+可达。部署客户端默认读取训练数据使用的 `ego_view`；只有显式传入 `--camera-host ""`
+时才会退回 `--camera 0` 指定的 PC 本地相机。
+
+## 4. 先测试急停
 
 必须让 G1 使用可靠吊架，操作者手保持在键盘空格上。按 Enter 后程序会释放宇树运动
 服务并进入 `rt/lowcmd`；只让一个腕关节以 0.05 rad 幅度、10 秒周期缓慢运动。
@@ -39,14 +58,14 @@ python test_estop_slow.py --network-interface enp7s0
 
 按 Space 或 Q 后应立即停止轨迹并保持触发时的实测位置。测试通过后再运行模型客户端。
 
-## 4. 模型客户端
+## 5. 模型客户端
 
 先不带 `--arm` 做网络、相机、输出维度和限位检查；确认持续打印合理目标后再加
 `--arm`，并在程序启动后按 Enter 二次解锁：
 
 ```bash
-python g1_joint_client.py --server <A800_1可达IP> --network-interface enp7s0 --camera 0 --view-camera
-python g1_joint_client.py --server <A800_1可达IP> --network-interface enp7s0 --camera 0 --view-camera --arm
+python g1_joint_client.py --server <A800_1可达IP> --network-interface enp7s0 --view-camera
+python g1_joint_client.py --server <A800_1可达IP> --network-interface enp7s0 --view-camera --arm
 ```
 
 真机启动顺序：
@@ -56,16 +75,19 @@ python g1_joint_client.py --server <A800_1可达IP> --network-interface enp7s0 -
    左臂为 `[0.120298, 0.162961, 0.468787, -0.279940, -0.156190, 0.076663, -0.247654]`；
    右臂为
    `[0.010702, -0.233477, -0.072876, -0.584854, 0.365135, 0.419927, -0.250482]`；
-   Inspire 手同步设为 `[0.998, 1, 0.998, 0.998, 0.999, 0.984]`（1 为张开）。
+   双手平滑下发 episode 0 当时的 `action.wbc=[1,1,1,1,1,1]`。程序通过
+   `rt/inspire/state` 检查 episode 0 实测状态：左手
+   `[0.999,0.998,0.998,0.998,0.999,0.983]`，右手
+   `[0.998,1,0.998,0.998,0.999,0.984]`。
    LowCmd 插值终点直接使用 episode 0 的 `observation.state`。插值结束后根据 LowState
    实测误差缓慢累积一个限速的位置修正量。默认修正速度不超过 `0.03 rad/s`，每个关节
    最多修正 `0.15 rad`；误差小于 `0.003 rad` 时停止积分，避免测量噪声导致漂移。
-3. 程序会同时检查左右臂所有关节与目标的误差；全部小于默认 `0.01 rad` 并连续保持
-   1 秒才显示 `READY`，同时打印双腕 target/measured/error。READY 后持续保持初始姿态，
-   但不会查询模型；检查现场后按 `L` 才开始推理。
+3. 程序会同时检查双臂与双手实测误差；手臂全部小于 `0.01 rad`、手指全部小于 `0.02`，
+   并连续保持 1 秒才显示 `READY`。READY 后持续保持初始姿态，但不会查询模型；检查现场
+   后按 `L` 才开始推理。
 4. 初始化和推理期间按 Space/Q 都会锁存急停。
 
-添加 `--view-camera` 后，dry-run 会立即打开 PC 实时相机窗口；正式部署则在初始化完成、
+添加 `--view-camera` 后，dry-run 会立即打开机器人 `ego_view`；正式部署则在初始化完成、
 进入 `READY` 后自动打开。相机采集与显示在独立线程中，A800 推理期间画面仍持续刷新。
 窗口获得焦点时可按 `L` 开始推理，按 Space/Q 急停；终端快捷键同时有效。
 如果 `cv2.getBuildInformation()` 显示 `GUI: NONE`，说明 `opencv-python-headless` 覆盖了
@@ -81,7 +103,9 @@ python g1_joint_client.py ... --arm \
   --initial-right-arm 0.010702 -0.233477 -0.072876 -0.584854 0.365135 0.419927 -0.250482 \
   --initial-correction-rate 1.0 --initial-correction-speed 0.03 \
   --initial-correction-limit 0.15 --initial-correction-deadband 0.003 \
-  --initial-right-hand 0.998 1 0.998 0.998 0.999 0.984
+  --initial-left-hand-state 0.999 0.998 0.998 0.998 0.999 0.983 \
+  --initial-right-hand-state 0.998 1 0.998 0.998 0.999 0.984 \
+  --initial-hand-command 1 1 1 1 1 1
 ```
 
 下发参考 SONICMJ 的 `rt/lowcmd` 低层控制。初始化时双臂同步移动到 episode 0；推理时
