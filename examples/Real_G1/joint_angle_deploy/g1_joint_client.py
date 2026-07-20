@@ -205,9 +205,8 @@ class CameraStream:
         if not self._show or phase not in {"DRY_RUN", "READY", "INFERENCE"} or frame is None:
             return None
         try:
-            cv2.rectangle(frame, (12, 10), (frame.shape[1] - 12, 68), (0, 0, 0), -1)
-            cv2.putText(frame, f"G1 CAMERA | {phase}", (24, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (80, 220, 255), 2)
-            cv2.putText(frame, "L: inference   SPACE/Q: E-STOP", (24, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (230, 230, 230), 1)
+            # Display the exact unobstructed robot image. Status and key hints
+            # stay in the terminal so the preview matches the model input.
             cv2.imshow("G1 Deployment Camera", frame)
             code = cv2.waitKey(1) & 0xFF
         except Exception as exc:
