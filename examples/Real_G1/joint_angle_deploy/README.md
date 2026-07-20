@@ -168,3 +168,15 @@ python examples/Real_G1/joint_angle_deploy/render_full_trajectory_mujoco.py
 ```bash
 python examples/Real_G1/joint_angle_deploy/render_full_trajectory_mujoco.py --viewer
 ```
+
+采集数据的旧41维格式可直接回放实测 `observation.state`：
+
+```bash
+/home/ykj/project/SONICMJ/GR00T-WholeBodyControl/.venv/bin/python \
+  examples/Real_G1/joint_angle_deploy/render_collected_episode_mujoco.py \
+  --dataset /home/ykj/project/SONICMJ/GR00T-WholeBodyControl/outputs/pick_up_pipette \
+  --episode 0
+```
+
+添加 `--source action` 可改为回放当时的 `action.wbc`，添加 `--viewer` 可使用交互窗口。
+该脚本会严格检查旧格式 `modality.json` 的41维布局，不会猜测或自动兼容后续新格式。
