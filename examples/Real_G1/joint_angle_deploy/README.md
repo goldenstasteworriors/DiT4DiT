@@ -90,6 +90,9 @@ python g1_joint_client.py --server <A800_1可达IP> --network-interface enp7s0 -
 添加 `--view-camera` 后，dry-run 会立即打开机器人 `ego_view`；正式部署则在初始化完成、
 进入 `READY` 后自动打开。相机采集与显示在独立线程中，A800 推理期间画面仍持续刷新。
 窗口获得焦点时可按 `L` 开始推理，按 Space/Q 急停；终端快捷键同时有效。
+客户端按 `ego_view` 帧时间戳判断画面是否真正更新；默认连续 `0.5 s` 没有新帧才打印
+`[CAMERA WARNING]`，且每 2 秒最多打印一次。SONIC 客户端原先较敏感的 100 ms
+stale 提示已关闭，可用 `--camera-stale-warning` 调整部署告警阈值。
 如果 `cv2.getBuildInformation()` 显示 `GUI: NONE`，说明 `opencv-python-headless` 覆盖了
 GUI 绑定；需在 `decoupled_vla_collection` 环境中安装与当前 OpenCV 同版本的
 `opencv-python`。相机/显示线程异常会回传主循环，并进入既有的安全保持流程。

@@ -119,7 +119,16 @@ class _QuietCameraFrameCounter(int):
 class CameraStream:
     """Continuously capture and optionally display camera frames independently of inference."""
 
-    def __init__(self, source: str, show: bool, camera_host: str, camera_port: int, camera_name: str):
+    def __init__(
+        self,
+        source: str,
+        show: bool,
+        camera_host: str,
+        camera_port: int,
+        camera_name: str,
+        stale_warning: float,
+        stale_log_interval: float,
+    ):
         self._capture = None
         self._robot_client = None
         self._camera_name = camera_name
@@ -127,10 +136,10 @@ class CameraStream:
             from gear_sonic.camera.composed_camera import ComposedCameraClientSensor
 
             self._robot_client = ComposedCameraClientSensor(server_ip=camera_host, port=camera_port)
-            # gear_sonic prints image latency whenever ``idx % 10 == 0`` with no
-            # verbosity switch. Preserve its counter semantics but disable only
-            # that periodic diagnostic; connection/staleness errors remain visible.
+            # gear_sonic has hard-coded 10-frame latency and 100-ms stale logs.
+            # Replace them with deployment-level diagnostics below.
             self._robot_client.idx = _QuietCameraFrameCounter(self._robot_client.idx)
+            self._robot_client._staleness_warning_interval = float("inf")
             print(f"[CAMERA] 使用机器人相机服务 {camera_host}:{camera_port}, stream={camera_name}")
         else:
             self._capture = cv2.VideoCapture(int(source) if source.isdigit() else source)
@@ -138,6 +147,11 @@ class CameraStream:
                 raise RuntimeError(f"无法打开本地相机 {source}")
             print(f"[CAMERA] 使用 PC 本地相机 {source}")
         self._show = show
+        self._stale_warning = stale_warning
+        self._stale_log_interval = stale_log_interval
+        self._last_robot_timestamp = None
+        self._last_new_frame_time = time.monotonic()
+        self._last_stale_log_time = 0.0
         self._lock = threading.Lock()
         self._frame = None
         self._phase = "STARTING"
@@ -170,6 +184,24 @@ class CameraStream:
                         raise RuntimeError(
                             f"robot camera stream {self._camera_name!r} missing; available: {available}"
                         )
+                    timestamp = (sample.get("timestamps") or {}).get(self._camera_name)
+                    now = time.monotonic()
+                    if timestamp is not None and timestamp == self._last_robot_timestamp:
+                        stale_for = now - self._last_new_frame_time
+                        if (
+                            stale_for >= self._stale_warning
+                            and now - self._last_stale_log_time >= self._stale_log_interval
+                        ):
+                            print(
+                                f"[CAMERA WARNING] ego_view has not updated for {stale_for:.2f}s; "
+                                "reusing the latest frame",
+                                flush=True,
+                            )
+                            self._last_stale_log_time = now
+                        time.sleep(0.005)
+                        continue
+                    self._last_robot_timestamp = timestamp
+                    self._last_new_frame_time = now
                     # SONIC camera messages are RGB; keep the internal/public frame in OpenCV BGR.
                     frame = cv2.cvtColor(np.asarray(images[self._camera_name]), cv2.COLOR_RGB2BGR)
                 else:
@@ -474,6 +506,8 @@ def main():
     parser.add_argument("--camera-host", default="192.168.123.164", help="SONIC robot camera server; pass an empty string for local camera")
     parser.add_argument("--camera-port", type=int, default=5555)
     parser.add_argument("--camera-name", default="ego_view", help="robot camera stream used by the training dataset")
+    parser.add_argument("--camera-stale-warning", type=float, default=0.5, help="warn after this many seconds without a genuinely new robot frame")
+    parser.add_argument("--camera-stale-log-interval", type=float, default=2.0, help="minimum interval between stale-camera warnings")
     parser.add_argument(
         "--view-camera",
         action="store_true",
@@ -567,6 +601,8 @@ def main():
     args = parser.parse_args()
     if not sys.stdin.isatty():
         raise SystemExit("必须在交互终端运行，确保键盘急停可用")
+    if args.camera_stale_warning <= 0.0 or args.camera_stale_log_interval <= 0.0:
+        raise SystemExit("camera stale warning/log intervals must be positive")
 
     robot = G1DDS(args.network_interface, args.lower_body_mode)
     policy = PolicyClient(args.server, args.port, args.timeout_ms)
@@ -576,6 +612,8 @@ def main():
         args.camera_host,
         args.camera_port,
         args.camera_name,
+        args.camera_stale_warning,
+        args.camera_stale_log_interval,
     )
     estop, period = EStop(), 1.0 / args.frequency
     signal.signal(signal.SIGINT, lambda *_: estop.trigger("Ctrl-C"))
