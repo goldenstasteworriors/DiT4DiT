@@ -38,13 +38,27 @@ def build_dataloader(cfg, dataset_py="lerobot_datasets_oxe"):
         from DiT4DiT.dataloader.lerobot_datasets import get_vla_dataset, collate_fn
         vla_dataset_cfg = cfg.datasets.vla_data
 
+        sharing_strategy = getattr(vla_dataset_cfg, "multiprocessing_sharing_strategy", None)
+        if sharing_strategy:
+            import torch.multiprocessing as mp
+
+            mp.set_sharing_strategy(sharing_strategy)
+
         vla_dataset = get_vla_dataset(data_cfg=vla_dataset_cfg)
-        
+        num_workers = getattr(vla_dataset_cfg, "num_workers", 4)
+        dataloader_kwargs = {}
+        if num_workers > 0:
+            dataloader_kwargs.update(
+                persistent_workers=getattr(vla_dataset_cfg, "persistent_workers", True),
+                prefetch_factor=getattr(vla_dataset_cfg, "prefetch_factor", 2),
+            )
+
         vla_train_dataloader = DataLoader(
             vla_dataset,
             batch_size=cfg.datasets.vla_data.per_device_batch_size,
             collate_fn=collate_fn,
-            num_workers=getattr(cfg.datasets.vla_data, "num_workers", 4),
+            num_workers=num_workers,
+            **dataloader_kwargs,
             # shuffle=True
         )        
         if dist.get_rank() == 0: 
