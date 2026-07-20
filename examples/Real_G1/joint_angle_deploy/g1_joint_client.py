@@ -28,8 +28,8 @@ LEFT_ARM_MOTORS = np.arange(15, 22)
 LOWER_BODY_MOTORS = np.arange(0, 15)
 POS_STOP_F = 2146000000.0
 VEL_STOP_F = 16000.0
-# SONICMJ g1_29dof_gear_wbc.yaml: soft arm gains and lower-body damping gains.
-ARM_KP = np.array([50.0, 50.0, 20.0, 20.0, 10.0, 10.0, 10.0])
+# SONICMJ g1_29dof_gear_wbc.yaml gains used by the data-collection control loop.
+ARM_KP = np.array([100.0, 100.0, 40.0, 40.0, 20.0, 20.0, 20.0])
 ARM_KD = np.array([5.0, 5.0, 2.0, 2.0, 2.0, 2.0, 2.0])
 LOWER_BODY_KD = np.array([2.0, 2.0, 2.0, 4.0, 2.0, 2.0, 2.0, 2.0, 2.0, 4.0, 2.0, 2.0, 5.0, 5.0, 5.0])
 LEFT_ARM_LOWER = np.array([-3.0892, -1.5882, -2.618, -1.0472, -1.9722, -1.6144, -1.6144])
@@ -387,7 +387,7 @@ def main():
     parser.add_argument("--max-hand-speed", type=float, default=0.5, help="normalized Inspire units/s")
     parser.add_argument("--initial-speed", type=float, default=0.15, help="initialization speed limit in rad/s")
     parser.add_argument("--initial-duration", type=float, default=5.0, help="minimum initialization duration in seconds")
-    parser.add_argument("--initial-tolerance", type=float, default=0.04, help="ready tolerance in rad")
+    parser.add_argument("--initial-tolerance", type=float, default=0.02, help="per-joint READY tolerance in rad")
     parser.add_argument(
         "--initial-left-arm",
         type=float,
@@ -451,6 +451,7 @@ def main():
     init_start_left_q = None
     init_start_time = 0.0
     init_duration = args.initial_duration
+    last_init_status_time = 0.0
     cache = np.empty((0, 13))
     left_hand_hold = right_hand_state.copy()
     try:
@@ -473,6 +474,7 @@ def main():
                 cache = np.empty((0, 13))
                 print("[INFERENCE] 模型已接管右臂")
             measured = robot.state(0.2)
+            left_arm_q = measured[LEFT_ARM_MOTORS]
             arm_q = measured[RIGHT_ARM_MOTORS]
             if phase == "START_INITIALIZATION":
                 init_start_left_q = measured[LEFT_ARM_MOTORS].copy()
@@ -494,10 +496,32 @@ def main():
                 left_target = _minimum_jerk(init_start_left_q, initial_left_pose, progress)
                 robot.send_arms(left_target, target)
                 robot.send_inspire_hands(right_hand_state, left_hand_hold)
-                if progress >= 1.0 and np.max(np.abs(arm_q - initial_pose)) <= args.initial_tolerance:
-                    phase = "READY"
-                    camera.set_phase(phase)
-                    print("[READY] 初始化姿态已到位。检查现场安全后按 L 启动模型")
+                if progress >= 1.0:
+                    left_error = initial_left_pose - left_arm_q
+                    right_error = initial_pose - arm_q
+                    max_error = max(float(np.max(np.abs(left_error))), float(np.max(np.abs(right_error))))
+                    now = time.monotonic()
+                    if max_error <= args.initial_tolerance:
+                        phase = "READY"
+                        camera.set_phase(phase)
+                        print("[READY] 双臂初始化姿态已到位。检查现场安全后按 L 启动模型")
+                        print(
+                            "  left wrist  target/measured/error: "
+                            f"{np.round(initial_left_pose[4:7], 4)} / "
+                            f"{np.round(left_arm_q[4:7], 4)} / {np.round(left_error[4:7], 4)}"
+                        )
+                        print(
+                            "  right wrist target/measured/error: "
+                            f"{np.round(initial_pose[4:7], 4)} / "
+                            f"{np.round(arm_q[4:7], 4)} / {np.round(right_error[4:7], 4)}"
+                        )
+                    elif now - last_init_status_time >= 1.0:
+                        print(
+                            f"[INITIALIZING] waiting for both arms, max_error={max_error:.4f} rad | "
+                            f"L-wrist err={np.round(left_error[4:7], 4)} | "
+                            f"R-wrist err={np.round(right_error[4:7], 4)}"
+                        )
+                        last_init_status_time = now
                 time.sleep(max(0.0, period - (time.monotonic() - start)))
                 continue
             if phase in ("DISARMED", "READY"):
