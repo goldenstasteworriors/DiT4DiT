@@ -56,7 +56,7 @@ datasets:
     include_state: true
     action_type: joint_position
     default_image_resolution: [3, 224, 224]
-    per_device_batch_size: 1
+    per_device_batch_size: 4
     num_workers: 4
     multiprocessing_sharing_strategy: file_system
     persistent_workers: true
