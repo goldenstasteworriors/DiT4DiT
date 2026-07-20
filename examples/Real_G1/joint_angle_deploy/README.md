@@ -125,7 +125,9 @@ NaN/形状检查、URDF 硬限位、
 
 ## 6. 播放已保存的右臂轨迹
 
-`play_right_arm_trajectory.py` 读取完整 episode 推理 NPZ，只控制 G1 右臂，不发布
+`play_right_arm_trajectory.py` 读取完整 episode 推理 NPZ，并从原始采集 Parquet 首帧读取
+对应 episode 的左右臂初始姿态；初始化阶段双臂同步移动，播放阶段左臂保持该初始姿态、
+右臂播放推理轨迹。脚本不发布
 `rt/inspire/cmd`。因此灵巧手可以由单独的 DDS/Modbus bridge 运行用户指定的任务：
 
 ```bash
@@ -138,22 +140,25 @@ python decoupled_wbc/scripts/inspire_modbus_hand.py --mode dds \
 先离线检查轨迹的形状、有限值、URDF 限位和相邻目标速度；此命令不连接 DDS：
 
 ```bash
-python examples/Real_G1/joint_angle_deploy/play_right_arm_trajectory.py
+conda run --no-capture-output -n decoupled_vla_collection python \
+  examples/Real_G1/joint_angle_deploy/play_right_arm_trajectory.py
 ```
 
 确认 G1 已由可靠吊架完全承重、灵巧手 bridge 正常后，再启用真机下发：
 
 ```bash
-python examples/Real_G1/joint_angle_deploy/play_right_arm_trajectory.py \
-  --network-interface enp7s0 --arm
+conda run --no-capture-output -n decoupled_vla_collection python \
+  examples/Real_G1/joint_angle_deploy/play_right_arm_trajectory.py \
+  --network-interface enp7s0 --lower-body-mode damping \
+  --initial-duration 8 --initial-speed 0.1 --arm
 ```
 
 脚本默认通过 `--episode 0` 在 `inference_records/` 中自动选择该 episode 的最高 steps
 完整推理 NPZ。它对每帧的
 16 步预测做因果重叠窗口平均，以2倍慢放（`--slowdown 2`）推进607个目标，并在离线阶段
 生成最终100 Hz命令序列。每周期变化被硬限制为0.25 rad/s，随后再次检查 NaN/Inf、URDF
-限位和最终命令峰值；任何检查失败都会在连接 DDS 前退出。先以 minimum-jerk 插值移动到
-NPZ 保存的 episode0 输入右臂姿态，到达 `READY` 后必须按 `L` 才连续播放完整轨迹。
+限位和最终命令峰值；任何检查失败都会在连接 DDS 前退出。先以 minimum-jerk 插值将
+左右臂同步移动到对应 episode 的首帧输入姿态，到达 `READY` 后必须按 `L` 才连续播放完整轨迹。
 播放完成后保持末姿态。
 任意阶段按 Space/Q 或 Ctrl-C 都会锁存急停，
 短暂保持触发时的实测角后停止发布。腿和腰默认只使用速度阻尼，不提供主动平衡能力。

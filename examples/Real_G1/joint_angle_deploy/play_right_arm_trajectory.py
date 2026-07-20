@@ -24,6 +24,11 @@ import numpy as np
 
 
 DEFAULT_RECORDS_DIR = Path(__file__).resolve().parents[3] / "inference_records"
+DEFAULT_SOURCE_DATASET = Path(
+    "/home/ykj/project/SONICMJ/GR00T-WholeBodyControl/outputs/pick_up_pipette"
+)
+LEFT_ARM_LOWER = np.array([-3.0892, -1.5882, -2.618, -1.0472, -1.9722, -1.6144, -1.6144])
+LEFT_ARM_UPPER = np.array([2.6704, 2.2515, 2.618, 2.0944, 1.9722, 1.6144, 1.6144])
 RIGHT_ARM_LOWER = np.array([-3.0892, -2.2515, -2.618, -1.0472, -1.9722, -1.6144, -1.6144])
 RIGHT_ARM_UPPER = np.array([2.6704, 1.5882, 2.618, 2.0944, 1.9722, 1.6144, 1.6144])
 
@@ -128,6 +133,37 @@ def load_full_episode(path: Path, aggregation: str) -> tuple[np.ndarray, np.ndar
     return initial_pose, targets, timestamps, metadata
 
 
+def load_episode_arm_initials(
+    dataset_root: Path, episode: int, inferred_right_pose: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, Path]:
+    """Read both arm poses from the corresponding raw episode's first observation."""
+    import pandas as pd
+
+    dataset_root = dataset_root.expanduser().resolve()
+    matches = sorted(dataset_root.glob(f"data/chunk-*/episode_{episode:06d}.parquet"))
+    if len(matches) != 1:
+        raise FileNotFoundError(
+            f"expected one raw parquet for episode {episode}, found {len(matches)} under {dataset_root}"
+        )
+    parquet = matches[0]
+    frame = pd.read_parquet(parquet, columns=["observation.state"])
+    if frame.empty:
+        raise ValueError(f"raw episode contains no frames: {parquet}")
+    state = np.asarray(frame.iloc[0]["observation.state"], dtype=np.float64)
+    if state.shape != (41,) or not np.isfinite(state).all():
+        raise ValueError(f"expected finite 41-D observation.state, got {state.shape}")
+    left_pose = state[15:22].copy()
+    right_pose = state[22:29].copy()
+    if not np.allclose(right_pose, inferred_right_pose, atol=1e-5, rtol=0.0):
+        mismatch = float(np.max(np.abs(right_pose - inferred_right_pose)))
+        raise ValueError(
+            f"raw/inference episode mismatch: initial right-arm difference is {mismatch:.6f} rad"
+        )
+    if np.any(left_pose < LEFT_ARM_LOWER) or np.any(left_pose > LEFT_ARM_UPPER):
+        raise ValueError("raw initial left-arm pose exceeds G1 URDF joint limits")
+    return left_pose, right_pose, parquet
+
+
 def build_rate_limited_commands(
     initial_pose: np.ndarray,
     targets: np.ndarray,
@@ -168,13 +204,19 @@ def build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--episode", type=int, default=0, help="episode selected from inference_records")
     parser.add_argument("--trajectory", type=Path, default=None, help="explicit NPZ overrides --episode lookup")
+    parser.add_argument(
+        "--dataset",
+        type=Path,
+        default=DEFAULT_SOURCE_DATASET,
+        help="raw collected dataset used to load both arms' episode initial pose",
+    )
     parser.add_argument("--aggregation", choices=("temporal-ensemble", "first"), default="temporal-ensemble")
     parser.add_argument("--slowdown", type=float, default=2.0, help="2.0 means two-times slower than dataset time")
     parser.add_argument("--network-interface", default="enp7s0")
     parser.add_argument("--frequency", type=float, default=100.0, help="DDS command frequency in Hz")
     parser.add_argument("--max-speed", type=float, default=0.25, help="hard command limit in rad/s per joint")
-    parser.add_argument("--initial-duration", type=float, default=5.0)
-    parser.add_argument("--initial-speed", type=float, default=0.15, help="initialization limit in rad/s")
+    parser.add_argument("--initial-duration", type=float, default=8.0)
+    parser.add_argument("--initial-speed", type=float, default=0.1, help="initialization limit in rad/s")
     parser.add_argument("--initial-tolerance", type=float, default=0.03, help="READY tolerance in rad")
     parser.add_argument("--stable-duration", type=float, default=1.0)
     parser.add_argument(
@@ -202,6 +244,9 @@ def main() -> None:
         initial_pose, targets, timestamps, metadata = load_full_episode(
             trajectory_path, args.aggregation
         )
+        initial_left_pose, initial_pose, initial_parquet = load_episode_arm_initials(
+            args.dataset, args.episode, initial_pose
+        )
         source_dt = float(np.median(np.diff(timestamps)))
         target_dt = source_dt * args.slowdown
         raw_peak_speed = float(np.max(np.abs(np.diff(targets, axis=0))) / target_dt)
@@ -224,6 +269,8 @@ def main() -> None:
     print(f"maximum target tracking lag: {max_tracking_error:.3f} rad")
     print(f"100 Hz commands: {len(commands)} x 7")
     print(f"episode {args.episode} input pose: {np.round(initial_pose, 4)}")
+    print(f"raw initial state: {initial_parquet}")
+    print(f"episode {args.episode} left input pose: {np.round(initial_left_pose, 4)}")
     print(f"final command: {np.round(commands[-1], 4)}")
     if not args.arm:
         print("[DRY RUN] 最终下发序列检查通过；未连接 DDS，也未发送任何命令")
@@ -231,7 +278,7 @@ def main() -> None:
     if not sys.stdin.isatty():
         raise SystemExit("真机模式必须在交互终端运行，确保 SPACE/Q 急停可用")
 
-    from g1_joint_client import G1DDS, RIGHT_ARM_MOTORS
+    from g1_joint_client import G1DDS, LEFT_ARM_MOTORS, RIGHT_ARM_MOTORS
 
     robot = G1DDS(args.network_interface, args.lower_body_mode)
     estop = EStop()
@@ -242,6 +289,7 @@ def main() -> None:
     enabled = False
     phase = "DISARMED"
     init_start = np.zeros(7)
+    init_start_left = np.zeros(7)
     init_start_time = 0.0
     init_duration = args.initial_duration
     stable_since = None
@@ -258,23 +306,32 @@ def main() -> None:
                 break
 
             measured = robot.state(0.2)
+            left_q = measured[LEFT_ARM_MOTORS]
             right_q = measured[RIGHT_ARM_MOTORS]
             if key in ("\n", "\r") and phase == "DISARMED":
                 robot.enter_low_level(measured)
                 enabled = True
                 init_start = right_q.copy()
-                distance = float(np.max(np.abs(initial_pose - init_start)))
+                init_start_left = left_q.copy()
+                distance = max(
+                    float(np.max(np.abs(initial_pose - init_start))),
+                    float(np.max(np.abs(initial_left_pose - init_start_left))),
+                )
                 init_duration = max(args.initial_duration, 1.875 * distance / args.initial_speed)
                 init_start_time = time.monotonic()
                 phase = "INITIALIZING"
-                print(f"[ARMED] 开始移动到 episode {args.episode} 输入姿态，预计 {init_duration:.1f}s")
+                print(f"[ARMED] 双臂开始移动到 episode {args.episode} 输入姿态，预计 {init_duration:.1f}s")
 
             if phase == "INITIALIZING":
                 progress = (time.monotonic() - init_start_time) / init_duration
                 target = minimum_jerk(init_start, initial_pose, progress)
-                robot.send_right_arm(target, measured)
+                left_target = minimum_jerk(init_start_left, initial_left_pose, progress)
+                robot.send_arms(left_target, target)
                 if progress >= 1.0:
-                    error = float(np.max(np.abs(initial_pose - right_q)))
+                    error = max(
+                        float(np.max(np.abs(initial_pose - right_q))),
+                        float(np.max(np.abs(initial_left_pose - left_q))),
+                    )
                     if error <= args.initial_tolerance:
                         stable_since = stable_since or time.monotonic()
                         if time.monotonic() - stable_since >= args.stable_duration:
@@ -284,7 +341,7 @@ def main() -> None:
                         stable_since = None
 
             elif phase == "READY":
-                robot.send_right_arm(initial_pose, measured)
+                robot.send_arms(initial_left_pose, initial_pose)
                 if key == "l":
                     command_index = 0
                     previous_command = commands[0].copy()
@@ -296,7 +353,7 @@ def main() -> None:
                 runtime_speed = float(np.max(np.abs(command - previous_command)) * args.frequency)
                 if runtime_speed > args.max_speed + 1e-9:
                     raise RuntimeError(f"runtime command speed guard triggered: {runtime_speed:.6f} rad/s")
-                robot.send_right_arm(command, measured)
+                robot.send_arms(initial_left_pose, command)
                 previous_command = command.copy()
                 command_index += 1
                 if command_index >= len(commands):
@@ -304,7 +361,7 @@ def main() -> None:
                     print("[DONE] 完整轨迹播放完成；保持末姿态，按 SPACE/Q 停止")
 
             elif phase == "HOLDING":
-                robot.send_right_arm(commands[-1], measured)
+                robot.send_arms(initial_left_pose, commands[-1])
 
             time.sleep(max(0.0, period - (time.monotonic() - cycle_start)))
     except Exception as exc:
@@ -313,9 +370,10 @@ def main() -> None:
         try:
             if enabled:
                 measured = robot.state(0.2)
-                held = measured[RIGHT_ARM_MOTORS].copy()
+                held_left = measured[LEFT_ARM_MOTORS].copy()
+                held_right = measured[RIGHT_ARM_MOTORS].copy()
                 for _ in range(20):
-                    robot.send_right_arm(held, measured)
+                    robot.send_arms(held_left, held_right)
                     time.sleep(0.01)
         finally:
             robot.stop_low_level_publisher()
