@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import select
 import signal
 import sys
@@ -22,11 +23,7 @@ from pathlib import Path
 import numpy as np
 
 
-DEFAULT_TRAJECTORY = (
-    Path(__file__).resolve().parents[3]
-    / "inference_records"
-    / "joints_steps_56000_episode_000000_full.npz"
-)
+DEFAULT_RECORDS_DIR = Path(__file__).resolve().parents[3] / "inference_records"
 RIGHT_ARM_LOWER = np.array([-3.0892, -2.2515, -2.618, -1.0472, -1.9722, -1.6144, -1.6144])
 RIGHT_ARM_UPPER = np.array([2.6704, 1.5882, 2.618, 2.0944, 1.9722, 1.6144, 1.6144])
 
@@ -51,6 +48,29 @@ def minimum_jerk(start: np.ndarray, goal: np.ndarray, progress: float) -> np.nda
     x = float(np.clip(progress, 0.0, 1.0))
     blend = 10.0 * x**3 - 15.0 * x**4 + 6.0 * x**5
     return start + blend * (goal - start)
+
+
+def resolve_trajectory(episode: int, explicit: Path | None) -> Path:
+    if episode < 0:
+        raise ValueError("episode must be non-negative")
+    if explicit is not None:
+        path = explicit.expanduser().resolve()
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        return path
+    pattern = f"joints_steps_*_episode_{episode:06d}_full.npz"
+    candidates = []
+    for path in DEFAULT_RECORDS_DIR.glob(pattern):
+        match = re.fullmatch(
+            rf"joints_steps_(\d+)_episode_{episode:06d}_full\.npz", path.name
+        )
+        if match:
+            candidates.append((int(match.group(1)), path))
+    if not candidates:
+        raise FileNotFoundError(
+            f"no full inference result for episode {episode}: {DEFAULT_RECORDS_DIR / pattern}"
+        )
+    return max(candidates, key=lambda item: item[0])[1].resolve()
 
 
 def temporal_ensemble(action_chunks: np.ndarray) -> np.ndarray:
@@ -146,7 +166,8 @@ def validate_commands(commands: np.ndarray, frequency: float, max_speed: float) 
 
 def build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--trajectory", type=Path, default=DEFAULT_TRAJECTORY)
+    parser.add_argument("--episode", type=int, default=0, help="episode selected from inference_records")
+    parser.add_argument("--trajectory", type=Path, default=None, help="explicit NPZ overrides --episode lookup")
     parser.add_argument("--aggregation", choices=("temporal-ensemble", "first"), default="temporal-ensemble")
     parser.add_argument("--slowdown", type=float, default=2.0, help="2.0 means two-times slower than dataset time")
     parser.add_argument("--network-interface", default="enp7s0")
@@ -176,8 +197,8 @@ def main() -> None:
     ) <= 0.0:
         raise SystemExit("all slowdown, timing, speed, and tolerance arguments must be positive")
 
-    trajectory_path = args.trajectory.expanduser().resolve()
     try:
+        trajectory_path = resolve_trajectory(args.episode, args.trajectory)
         initial_pose, targets, timestamps, metadata = load_full_episode(
             trajectory_path, args.aggregation
         )
@@ -202,7 +223,7 @@ def main() -> None:
     print(f"rate-limited command peak speed: {command_peak_speed:.3f}/{args.max_speed:.3f} rad/s")
     print(f"maximum target tracking lag: {max_tracking_error:.3f} rad")
     print(f"100 Hz commands: {len(commands)} x 7")
-    print(f"episode0 input pose: {np.round(initial_pose, 4)}")
+    print(f"episode {args.episode} input pose: {np.round(initial_pose, 4)}")
     print(f"final command: {np.round(commands[-1], 4)}")
     if not args.arm:
         print("[DRY RUN] 最终下发序列检查通过；未连接 DDS，也未发送任何命令")
@@ -246,7 +267,7 @@ def main() -> None:
                 init_duration = max(args.initial_duration, 1.875 * distance / args.initial_speed)
                 init_start_time = time.monotonic()
                 phase = "INITIALIZING"
-                print(f"[ARMED] 开始移动到 episode0 输入姿态，预计 {init_duration:.1f}s")
+                print(f"[ARMED] 开始移动到 episode {args.episode} 输入姿态，预计 {init_duration:.1f}s")
 
             if phase == "INITIALIZING":
                 progress = (time.monotonic() - init_start_time) / init_duration

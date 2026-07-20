@@ -21,6 +21,7 @@ from play_right_arm_trajectory import (
     build_rate_limited_commands,
     load_full_episode,
     minimum_jerk,
+    resolve_trajectory,
     validate_commands,
 )
 
@@ -39,11 +40,8 @@ RIGHT_ARM_JOINTS = [
 def build_argparser() -> argparse.ArgumentParser:
     root = Path(__file__).resolve().parents[3]
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--trajectory",
-        type=Path,
-        default=root / "inference_records/joints_steps_56000_episode_000000_full.npz",
-    )
+    parser.add_argument("--episode", type=int, default=0, help="episode selected from inference_records")
+    parser.add_argument("--trajectory", type=Path, default=None, help="explicit NPZ overrides --episode lookup")
     parser.add_argument(
         "--model-xml",
         type=Path,
@@ -53,7 +51,7 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output",
         type=Path,
-        default=root / "inference_records/g1_full_episode0_2x_slow_simulation.mp4",
+        default=None,
     )
     parser.add_argument("--aggregation", choices=("temporal-ensemble", "first"), default="temporal-ensemble")
     parser.add_argument("--slowdown", type=float, default=2.0)
@@ -100,6 +98,7 @@ def make_render_timeline(
 
 def main() -> None:
     args = build_argparser().parse_args()
+    root = Path(__file__).resolve().parents[3]
     if min(
         args.slowdown,
         args.control_frequency,
@@ -113,7 +112,7 @@ def main() -> None:
     ) <= 0:
         raise SystemExit("all timing, speed, FPS, and image-size arguments must be positive")
 
-    trajectory_path = args.trajectory.expanduser().resolve()
+    trajectory_path = resolve_trajectory(args.episode, args.trajectory)
     model_path = args.model_xml.expanduser().resolve()
     initial_pose, targets, timestamps, metadata = load_full_episode(
         trajectory_path, args.aggregation
@@ -180,7 +179,13 @@ def main() -> None:
     camera.azimuth = 150
     camera.elevation = -12
     renderer = mujoco.Renderer(model, height=args.height, width=args.width)
-    output = args.output.expanduser().resolve()
+    output = (
+        args.output.expanduser().resolve()
+        if args.output is not None
+        else root
+        / "inference_records"
+        / f"g1_inference_episode_{args.episode:06d}_2x_slow_simulation.mp4"
+    )
     output.parent.mkdir(parents=True, exist_ok=True)
     writer = cv2.VideoWriter(
         str(output), cv2.VideoWriter_fourcc(*"mp4v"), args.fps, (args.width, args.height)
