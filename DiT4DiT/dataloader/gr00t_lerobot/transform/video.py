@@ -15,7 +15,6 @@
 
 from typing import Any, Callable, ClassVar, Literal
 
-import albumentations as A
 import cv2
 import numpy as np
 import torch
@@ -26,6 +25,16 @@ from PIL import Image
 
 from ..schema import DatasetMetadata
 from .base import ModalityTransform
+
+
+def _get_albumentations():
+    try:
+        import albumentations as A
+    except ImportError as exc:
+        raise ImportError(
+            "albumentations is required only when using the albumentations video backend"
+        ) from exc
+    return A
 
 
 class VideoTransform(ModalityTransform):
@@ -143,6 +152,7 @@ class VideoTransform(ModalityTransform):
         train_transform = self.get_transform(mode="train")
         eval_transform = self.get_transform(mode="eval")
         if self.backend == "albumentations":
+            A = _get_albumentations()
             self.train_transform = A.ReplayCompose(transforms=[train_transform])  # type: ignore
             if eval_transform is not None:
                 self.eval_transform = A.ReplayCompose(transforms=[eval_transform])  # type: ignore
@@ -185,6 +195,7 @@ class VideoTransform(ModalityTransform):
         if self.backend == "torchvision":
             views = transform(views)
         elif self.backend == "albumentations":
+            A = _get_albumentations()
             assert isinstance(transform, A.ReplayCompose), "Transform must be a ReplayCompose"
             first_frame = views[0]
             transformed = transform(image=first_frame)
@@ -279,6 +290,7 @@ class VideoCrop(VideoTransform):
             else:
                 raise ValueError(f"Crop mode {mode} not supported")
         elif self.backend == "albumentations":
+            A = _get_albumentations()
             if mode == "train":
                 return A.RandomCrop(height=size[0], width=size[1], p=1)
             elif mode == "eval":
@@ -332,6 +344,7 @@ class VideoResize(VideoTransform):
             size = (self.height, self.width)
             return T.Resize(size, interpolation=interpolation, antialias=self.antialias)
         elif self.backend == "albumentations":
+            A = _get_albumentations()
             return A.Resize(
                 height=self.height,
                 width=self.width,
@@ -372,6 +385,7 @@ class VideoRandomRotation(VideoTransform):
         if self.backend == "torchvision":
             return T.RandomRotation(self.degrees, interpolation=interpolation)  # type: ignore
         elif self.backend == "albumentations":
+            A = _get_albumentations()
             return A.Rotate(limit=self.degrees, interpolation=interpolation, p=1)
         else:
             raise ValueError(f"Backend {self.backend} not supported")
@@ -394,6 +408,7 @@ class VideoHorizontalFlip(VideoTransform):
         if self.backend == "torchvision":
             return T.RandomHorizontalFlip(self.p)
         elif self.backend == "albumentations":
+            A = _get_albumentations()
             return A.HorizontalFlip(p=self.p)
         else:
             raise ValueError(f"Backend {self.backend} not supported")
@@ -416,6 +431,7 @@ class VideoGrayscale(VideoTransform):
         if self.backend == "torchvision":
             return T.RandomGrayscale(self.p)
         elif self.backend == "albumentations":
+            A = _get_albumentations()
             return A.ToGray(p=self.p)
         else:
             raise ValueError(f"Backend {self.backend} not supported")
@@ -452,6 +468,7 @@ class VideoColorJitter(VideoTransform):
                 hue=self.hue,
             )
         elif self.backend == "albumentations":
+            A = _get_albumentations()
             return A.ColorJitter(
                 brightness=self.brightness,
                 contrast=self.contrast,
@@ -480,6 +497,7 @@ class VideoRandomGrayscale(VideoTransform):
         if self.backend == "torchvision":
             return T.RandomGrayscale(self.p)
         elif self.backend == "albumentations":
+            A = _get_albumentations()
             return A.ToGray(p=self.p)
         else:
             raise ValueError(f"Backend {self.backend} not supported")
@@ -503,6 +521,7 @@ class VideoRandomPosterize(VideoTransform):
         if self.backend == "torchvision":
             return T.RandomPosterize(bits=self.bits, p=self.p)
         elif self.backend == "albumentations":
+            A = _get_albumentations()
             return A.Posterize(num_bits=self.bits, p=self.p)
         else:
             raise ValueError(f"Backend {self.backend} not supported")
