@@ -1,0 +1,28 @@
+{
+  "source": "complete episode_000000",
+  "dataset_root": "/workspace/WM/dit4dit/DiT4DiT_data/derived/pick_up_pipette_right_joints",
+  "parquet": "/workspace/WM/dit4dit/DiT4DiT_data/derived/pick_up_pipette_right_joints/data/chunk-000/episode_000000.parquet",
+  "video": "/workspace/WM/dit4dit/DiT4DiT_data/derived/pick_up_pipette_right_joints/videos/chunk-000/observation.images.ego_view/episode_000000.mp4",
+  "frames": 607,
+  "fps": 50.0,
+  "duration_seconds": 12.119999885559082,
+  "instruction": "pick up the pipette",
+  "checkpoint": "steps_56000_pytorch_model.pt",
+  "prediction_shape": [
+    607,
+    16,
+    13
+  ],
+  "first_action_trajectory_shape": [
+    607,
+    13
+  ],
+  "latency_seconds": {
+    "mean": 0.2496314900919574,
+    "median": 0.22785434685647488,
+    "min": 0.18900728598237038,
+    "max": 1.011026257649064,
+    "total": 151.52631448581815
+  },
+  "npz": "joints_steps_56000_episode_000000_full.npz"
+}
