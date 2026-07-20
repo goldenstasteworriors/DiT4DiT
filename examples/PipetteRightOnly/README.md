@@ -36,3 +36,14 @@ bash examples/PipetteRightOnly/launch_two_trainings_a800.sh
 
 The A800 launcher defaults to GPU pairs `0,1` and `2,3`. Override them after checking current GPU
 occupancy, for example `JOINT_GPUS=4,5 WRIST_GPUS=6,7 bash .../launch_two_trainings_a800.sh`.
+
+On a four-card Zhenwu PPU node, keep the project environment, datasets, backbone, caches, and runs
+under `/workspace/WM`, then launch both two-device jobs with the PPU SDK environment loaded by the
+launcher:
+
+```bash
+bash examples/PipetteRightOnly/launch_two_trainings_ppu.sh
+```
+
+The PPU launcher defaults to device pairs `0,1` and `2,3`, uses the official PPU PyTorch runtime,
+and keeps Hugging Face, Torch, Triton, and temporary caches under `/workspace/WM/DiT4DiT_cache`.
