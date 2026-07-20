@@ -57,6 +57,9 @@ python g1_joint_client.py --server <A800_1可达IP> --network-interface enp7s0 -
    右臂为
    `[0.010702, -0.233477, -0.072876, -0.584854, 0.365135, 0.419927, -0.250482]`；
    Inspire 手同步设为 `[0.998, 1, 0.998, 0.998, 0.999, 0.984]`（1 为张开）。
+   注意：LowCmd 插值终点使用 episode 0 的 `action.wbc`，READY 判定使用对应的
+   `observation.state`。采集时 WBC 命令与重力/动力学作用后的实测关节角本来就有偏差，
+   不能把 observation 直接当作 LowCmd 目标。
 3. 程序会同时检查左右臂所有关节与目标的误差；全部小于默认 `0.02 rad` 才显示
    `READY`，并打印双腕 target/measured/error。READY 后持续保持初始姿态，但不会查询
    模型；检查现场后按 `L` 才开始推理。
@@ -73,6 +76,8 @@ python g1_joint_client.py ... --arm \
   --initial-duration 8 --initial-speed 0.1 \
   --initial-left-arm 0.120298 0.162961 0.468787 -0.279940 -0.156190 0.076663 -0.247654 \
   --initial-right-arm 0.010702 -0.233477 -0.072876 -0.584854 0.365135 0.419927 -0.250482 \
+  --initial-left-arm-command 0.094551 0.190001 0.490996 -0.409179 -0.187500 -0.047862 -0.249860 \
+  --initial-right-arm-command -0.023903 -0.252399 -0.105313 -0.685039 0.378521 0.356759 -0.251013 \
   --initial-right-hand 0.998 1 0.998 0.998 0.999 0.984
 ```
 
