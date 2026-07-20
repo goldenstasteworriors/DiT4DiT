@@ -62,6 +62,22 @@ def _unpack_array(obj):
     return obj
 
 
+def _update_pose_correction(
+    correction: np.ndarray,
+    error: np.ndarray,
+    dt: float,
+    integral_gain: float,
+    speed_limit: float,
+    position_limit: float,
+    deadband: float,
+) -> np.ndarray:
+    """Integrate measured pose error with per-cycle speed and total-offset limits."""
+    active_error = np.where(np.abs(error) > deadband, error, 0.0)
+    max_step = speed_limit * dt
+    delta = np.clip(integral_gain * active_error * dt, -max_step, max_step)
+    return np.clip(correction + delta, -position_limit, position_limit)
+
+
 class PolicyClient:
     def __init__(self, host: str, port: int, timeout_ms: int):
         self.context = zmq.Context()
@@ -387,18 +403,36 @@ def main():
     parser.add_argument("--max-hand-speed", type=float, default=0.5, help="normalized Inspire units/s")
     parser.add_argument("--initial-speed", type=float, default=0.15, help="initialization speed limit in rad/s")
     parser.add_argument("--initial-duration", type=float, default=5.0, help="minimum initialization duration in seconds")
-    parser.add_argument("--initial-tolerance", type=float, default=0.02, help="per-joint READY tolerance in rad")
+    parser.add_argument("--initial-tolerance", type=float, default=0.01, help="per-joint READY tolerance in rad")
     parser.add_argument(
         "--initial-correction-rate",
         type=float,
-        default=0.5,
+        default=1.0,
         help="post-interpolation outer-loop correction rate in 1/s",
+    )
+    parser.add_argument(
+        "--initial-correction-speed",
+        type=float,
+        default=0.03,
+        help="maximum correction-offset change speed in rad/s",
     )
     parser.add_argument(
         "--initial-correction-limit",
         type=float,
-        default=0.05,
+        default=0.15,
         help="maximum outer-loop position offset per joint in rad",
+    )
+    parser.add_argument(
+        "--initial-correction-deadband",
+        type=float,
+        default=0.003,
+        help="do not integrate joint errors smaller than this value in rad",
+    )
+    parser.add_argument(
+        "--initial-stable-duration",
+        type=float,
+        default=1.0,
+        help="all joints must remain within tolerance for this many seconds before READY",
     )
     parser.add_argument(
         "--initial-left-arm",
@@ -450,8 +484,16 @@ def main():
         raise SystemExit("initial-left-arm exceeds URDF joint limits")
     if np.any(initial_pose < RIGHT_ARM_LOWER) or np.any(initial_pose > RIGHT_ARM_UPPER):
         raise SystemExit("initial-right-arm exceeds URDF joint limits")
-    if args.initial_correction_rate < 0.0 or args.initial_correction_limit < 0.0:
-        raise SystemExit("initial correction rate/limit must be non-negative")
+    if min(
+        args.initial_correction_rate,
+        args.initial_correction_speed,
+        args.initial_correction_limit,
+        args.initial_correction_deadband,
+        args.initial_stable_duration,
+    ) < 0.0:
+        raise SystemExit("initial correction and stable-duration parameters must be non-negative")
+    if args.initial_correction_deadband >= args.initial_tolerance:
+        raise SystemExit("initial-correction-deadband must be smaller than initial-tolerance")
     if np.any(right_hand_state < 0.0) or np.any(right_hand_state > 1.0):
         raise SystemExit("initial-right-hand must be normalized to [0, 1]")
     print(f"初始化目标关节角: {np.round(initial_pose, 4)}")
@@ -466,6 +508,7 @@ def main():
     init_start_time = 0.0
     init_duration = args.initial_duration
     last_init_status_time = 0.0
+    within_tolerance_since = None
     left_init_correction = np.zeros(7, dtype=np.float64)
     right_init_correction = np.zeros(7, dtype=np.float64)
     cache = np.empty((0, 13))
@@ -513,16 +556,23 @@ def main():
                 if progress >= 1.0:
                     left_error = initial_left_pose - left_arm_q
                     right_error = initial_pose - arm_q
-                    correction_step = args.initial_correction_rate * period
-                    left_init_correction = np.clip(
-                        left_init_correction + correction_step * left_error,
-                        -args.initial_correction_limit,
+                    left_init_correction = _update_pose_correction(
+                        left_init_correction,
+                        left_error,
+                        period,
+                        args.initial_correction_rate,
+                        args.initial_correction_speed,
                         args.initial_correction_limit,
+                        args.initial_correction_deadband,
                     )
-                    right_init_correction = np.clip(
-                        right_init_correction + correction_step * right_error,
-                        -args.initial_correction_limit,
+                    right_init_correction = _update_pose_correction(
+                        right_init_correction,
+                        right_error,
+                        period,
+                        args.initial_correction_rate,
+                        args.initial_correction_speed,
                         args.initial_correction_limit,
+                        args.initial_correction_deadband,
                     )
                     left_target = np.clip(initial_left_pose + left_init_correction, LEFT_ARM_LOWER, LEFT_ARM_UPPER)
                     target = np.clip(initial_pose + right_init_correction, RIGHT_ARM_LOWER, RIGHT_ARM_UPPER)
@@ -532,6 +582,12 @@ def main():
                     max_error = max(float(np.max(np.abs(left_error))), float(np.max(np.abs(right_error))))
                     now = time.monotonic()
                     if max_error <= args.initial_tolerance:
+                        if within_tolerance_since is None:
+                            within_tolerance_since = now
+                    else:
+                        within_tolerance_since = None
+                    stable_duration = 0.0 if within_tolerance_since is None else now - within_tolerance_since
+                    if within_tolerance_since is not None and stable_duration >= args.initial_stable_duration:
                         phase = "READY"
                         camera.set_phase(phase)
                         print("[READY] 双臂初始化姿态已到位。检查现场安全后按 L 启动模型")
@@ -550,7 +606,10 @@ def main():
                             f"[INITIALIZING] waiting for both arms, max_error={max_error:.4f} rad | "
                             f"L-wrist err={np.round(left_error[4:7], 4)} | "
                             f"R-wrist err={np.round(right_error[4:7], 4)} | "
-                            f"correction_max={max(np.max(np.abs(left_init_correction)), np.max(np.abs(right_init_correction))):.4f} rad"
+                            f"correction_max={max(np.max(np.abs(left_init_correction)), np.max(np.abs(right_init_correction))):.4f} rad | "
+                            f"L-wrist corr={np.round(left_init_correction[4:7], 4)} | "
+                            f"R-wrist corr={np.round(right_init_correction[4:7], 4)} | "
+                            f"stable={stable_duration:.1f}/{args.initial_stable_duration:.1f}s"
                         )
                         last_init_status_time = now
                 time.sleep(max(0.0, period - (time.monotonic() - start)))
@@ -559,16 +618,23 @@ def main():
                 if phase == "READY":
                     left_error = initial_left_pose - left_arm_q
                     right_error = initial_pose - arm_q
-                    correction_step = args.initial_correction_rate * period
-                    left_init_correction = np.clip(
-                        left_init_correction + correction_step * left_error,
-                        -args.initial_correction_limit,
+                    left_init_correction = _update_pose_correction(
+                        left_init_correction,
+                        left_error,
+                        period,
+                        args.initial_correction_rate,
+                        args.initial_correction_speed,
                         args.initial_correction_limit,
+                        args.initial_correction_deadband,
                     )
-                    right_init_correction = np.clip(
-                        right_init_correction + correction_step * right_error,
-                        -args.initial_correction_limit,
+                    right_init_correction = _update_pose_correction(
+                        right_init_correction,
+                        right_error,
+                        period,
+                        args.initial_correction_rate,
+                        args.initial_correction_speed,
                         args.initial_correction_limit,
+                        args.initial_correction_deadband,
                     )
                     left_hold = np.clip(initial_left_pose + left_init_correction, LEFT_ARM_LOWER, LEFT_ARM_UPPER)
                     right_hold = np.clip(initial_pose + right_init_correction, RIGHT_ARM_LOWER, RIGHT_ARM_UPPER)

@@ -58,11 +58,11 @@ python g1_joint_client.py --server <A800_1可达IP> --network-interface enp7s0 -
    `[0.010702, -0.233477, -0.072876, -0.584854, 0.365135, 0.419927, -0.250482]`；
    Inspire 手同步设为 `[0.998, 1, 0.998, 0.998, 0.999, 0.984]`（1 为张开）。
    LowCmd 插值终点直接使用 episode 0 的 `observation.state`。插值结束后根据 LowState
-   实测误差缓慢累积一个小的位置修正量，默认每个关节最多修正 `0.05 rad`，避免腕部因
-   重力、摩擦等因素留下稳态误差。
-3. 程序会同时检查左右臂所有关节与目标的误差；全部小于默认 `0.02 rad` 才显示
-   `READY`，并打印双腕 target/measured/error。READY 后持续保持初始姿态，但不会查询
-   模型；检查现场后按 `L` 才开始推理。
+   实测误差缓慢累积一个限速的位置修正量。默认修正速度不超过 `0.03 rad/s`，每个关节
+   最多修正 `0.15 rad`；误差小于 `0.003 rad` 时停止积分，避免测量噪声导致漂移。
+3. 程序会同时检查左右臂所有关节与目标的误差；全部小于默认 `0.01 rad` 并连续保持
+   1 秒才显示 `READY`，同时打印双腕 target/measured/error。READY 后持续保持初始姿态，
+   但不会查询模型；检查现场后按 `L` 才开始推理。
 4. 初始化和推理期间按 Space/Q 都会锁存急停。
 
 添加 `--view-camera` 后，dry-run 会立即打开 PC 实时相机窗口；正式部署则在初始化完成、
@@ -76,7 +76,8 @@ python g1_joint_client.py ... --arm \
   --initial-duration 8 --initial-speed 0.1 \
   --initial-left-arm 0.120298 0.162961 0.468787 -0.279940 -0.156190 0.076663 -0.247654 \
   --initial-right-arm 0.010702 -0.233477 -0.072876 -0.584854 0.365135 0.419927 -0.250482 \
-  --initial-correction-rate 0.5 --initial-correction-limit 0.05 \
+  --initial-correction-rate 1.0 --initial-correction-speed 0.03 \
+  --initial-correction-limit 0.15 --initial-correction-deadband 0.003 \
   --initial-right-hand 0.998 1 0.998 0.998 0.999 0.984
 ```
 
