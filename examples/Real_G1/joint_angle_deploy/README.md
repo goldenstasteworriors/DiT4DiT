@@ -125,7 +125,7 @@ NaN/形状检查、URDF 硬限位、
 
 ## 6. 播放已保存的右臂轨迹
 
-`play_right_arm_trajectory.py` 读取推理结果 JSON，只控制 G1 右臂，不发布
+`play_right_arm_trajectory.py` 读取完整 episode 推理 NPZ，只控制 G1 右臂，不发布
 `rt/inspire/cmd`。因此灵巧手可以由单独的 DDS/Modbus bridge 运行用户指定的任务：
 
 ```bash
@@ -148,9 +148,11 @@ python examples/Real_G1/joint_angle_deploy/play_right_arm_trajectory.py \
   --network-interface enp7s0 --arm
 ```
 
-脚本默认读取 `inference_records/joints_steps_52000_episode_000000_result.json`，先以
-minimum-jerk 插值移动到 JSON 保存的 episode0 输入右臂姿态。到达 `READY` 后必须按 `L`
-才播放 16 步轨迹。默认每步 0.4 秒，使这条轨迹的峰值关节速度不超过 0.25 rad/s；
-若通过 `--action-dt` 加速后超过限制，脚本会在连接机器人前拒绝运行。播放完成后保持末姿态。
+脚本默认读取 `inference_records/joints_steps_56000_episode_000000_full.npz`。它对每帧的
+16 步预测做因果重叠窗口平均，以2倍慢放（`--slowdown 2`）推进607个目标，并在离线阶段
+生成最终100 Hz命令序列。每周期变化被硬限制为0.25 rad/s，随后再次检查 NaN/Inf、URDF
+限位和最终命令峰值；任何检查失败都会在连接 DDS 前退出。先以 minimum-jerk 插值移动到
+NPZ 保存的 episode0 输入右臂姿态，到达 `READY` 后必须按 `L` 才连续播放完整轨迹。
+播放完成后保持末姿态。
 任意阶段按 Space/Q 或 Ctrl-C 都会锁存急停，
 短暂保持触发时的实测角后停止发布。腿和腰默认只使用速度阻尼，不提供主动平衡能力。

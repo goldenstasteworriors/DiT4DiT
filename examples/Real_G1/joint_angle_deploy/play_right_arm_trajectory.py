@@ -1,7 +1,10 @@
-"""Safely replay a saved DiT4DiT right-arm trajectory on a suspended G1.
+"""Validate and safely replay a complete DiT4DiT right-arm episode on G1.
 
-The Inspire hand is intentionally not commanded here.  Run the existing
-inspire_modbus_hand.py DDS bridge independently when hand motion is required.
+The full inference NPZ contains one 16-step prediction chunk per observation.
+This script causally ensembles overlapping chunks, plays targets two times
+slower than the dataset by default, and precomputes the exact 100 Hz command
+sequence with a hard per-joint speed limit before any DDS connection is opened.
+The Inspire hand is intentionally not commanded here.
 """
 
 from __future__ import annotations
@@ -18,13 +21,12 @@ from pathlib import Path
 
 import numpy as np
 
+
 DEFAULT_TRAJECTORY = (
     Path(__file__).resolve().parents[3]
     / "inference_records"
-    / "joints_steps_52000_episode_000000_result.json"
+    / "joints_steps_56000_episode_000000_full.npz"
 )
-# Unitree G1 29-DoF right arm: shoulder pitch/roll/yaw, elbow, wrist roll/pitch/yaw.
-# These are the same URDF limits enforced by g1_joint_client.py.
 RIGHT_ARM_LOWER = np.array([-3.0892, -2.2515, -2.618, -1.0472, -1.9722, -1.6144, -1.6144])
 RIGHT_ARM_UPPER = np.array([2.6704, 1.5882, 2.618, 2.0944, 1.9722, 1.6144, 1.6144])
 
@@ -51,64 +53,111 @@ def minimum_jerk(start: np.ndarray, goal: np.ndarray, progress: float) -> np.nda
     return start + blend * (goal - start)
 
 
-def load_trajectory(path: Path) -> tuple[np.ndarray, np.ndarray, dict]:
-    with path.open(encoding="utf-8") as handle:
-        record = json.load(handle)
+def temporal_ensemble(action_chunks: np.ndarray) -> np.ndarray:
+    """Average all past chunks that predict each current episode timestep."""
+    episode_length, horizon, _ = action_chunks.shape
+    result = np.empty((episode_length, 7), dtype=np.float64)
+    for timestep in range(episode_length):
+        first_source = max(0, timestep - horizon + 1)
+        predictions = [
+            action_chunks[source, timestep - source, :7]
+            for source in range(first_source, timestep + 1)
+        ]
+        result[timestep] = np.mean(predictions, axis=0)
+    return result
 
-    actions = np.asarray(record.get("actions"), dtype=np.float64)
-    state = np.asarray(record.get("state"), dtype=np.float64)
-    if actions.ndim != 2 or actions.shape[0] == 0 or actions.shape[1] < 7:
-        raise ValueError(f"actions must have shape [T, >=7], got {actions.shape}")
-    if state.ndim != 1 or state.size < 7:
-        raise ValueError(f"state must contain at least 7 values, got {state.shape}")
-    right_arm = actions[:, :7]
-    initial_right_arm = state[:7]
-    if not np.isfinite(right_arm).all() or not np.isfinite(initial_right_arm).all():
+
+def load_full_episode(path: Path, aggregation: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
+    with np.load(path) as data:
+        required = {"timestamps", "input_states", "predicted_action_chunks", "first_predicted_actions"}
+        missing = required.difference(data.files)
+        if missing:
+            raise ValueError(f"NPZ missing arrays: {sorted(missing)}")
+        timestamps = np.asarray(data["timestamps"], dtype=np.float64)
+        input_states = np.asarray(data["input_states"], dtype=np.float64)
+        chunks = np.asarray(data["predicted_action_chunks"], dtype=np.float64)
+        first_actions = np.asarray(data["first_predicted_actions"], dtype=np.float64)
+
+    episode_length = len(timestamps)
+    if input_states.shape != (episode_length, 13):
+        raise ValueError(f"input_states must be [T,13], got {input_states.shape}")
+    if chunks.shape != (episode_length, 16, 13):
+        raise ValueError(f"predicted_action_chunks must be [T,16,13], got {chunks.shape}")
+    if first_actions.shape != (episode_length, 13):
+        raise ValueError(f"first_predicted_actions must be [T,13], got {first_actions.shape}")
+    if episode_length < 2 or np.any(np.diff(timestamps) <= 0.0):
+        raise ValueError("timestamps must contain at least two strictly increasing values")
+    if not all(np.isfinite(array).all() for array in (timestamps, input_states, chunks, first_actions)):
         raise ValueError("trajectory contains NaN or Inf")
-    if np.any(right_arm < RIGHT_ARM_LOWER) or np.any(right_arm > RIGHT_ARM_UPPER):
-        raise ValueError("trajectory exceeds G1 right-arm URDF joint limits")
-    if np.any(initial_right_arm < RIGHT_ARM_LOWER) or np.any(initial_right_arm > RIGHT_ARM_UPPER):
-        raise ValueError("episode0 input state exceeds G1 right-arm URDF joint limits")
-    return initial_right_arm, right_arm, record
+
+    if aggregation == "temporal-ensemble":
+        targets = temporal_ensemble(chunks)
+    else:
+        targets = first_actions[:, :7].copy()
+    initial_pose = input_states[0, :7].copy()
+    if np.any(targets < RIGHT_ARM_LOWER) or np.any(targets > RIGHT_ARM_UPPER):
+        raise ValueError("predicted right-arm targets exceed G1 URDF joint limits")
+    if np.any(initial_pose < RIGHT_ARM_LOWER) or np.any(initial_pose > RIGHT_ARM_UPPER):
+        raise ValueError("episode0 initial pose exceeds G1 URDF joint limits")
+
+    metadata = {}
+    summary_path = path.with_suffix(".json")
+    if summary_path.exists():
+        with summary_path.open(encoding="utf-8") as handle:
+            metadata = json.load(handle)
+    return initial_pose, targets, timestamps, metadata
 
 
-def check_trajectory_speed(
-    initial_right_arm: np.ndarray,
-    trajectory: np.ndarray,
-    action_dt: float,
+def build_rate_limited_commands(
+    initial_pose: np.ndarray,
+    targets: np.ndarray,
+    target_dt: float,
+    control_frequency: float,
     max_speed: float,
-) -> float:
-    segments = np.diff(np.vstack((initial_right_arm, trajectory)), axis=0)
-    peak_speed = float(np.max(np.abs(segments)) / action_dt)
+) -> tuple[np.ndarray, float]:
+    """Simulate the exact target follower used for real-robot command playback."""
+    control_dt = 1.0 / control_frequency
+    intervals = int(np.ceil((len(targets) - 1) * target_dt * control_frequency))
+    commands = np.empty((intervals + 1, 7), dtype=np.float64)
+    command = initial_pose.copy()
+    commands[0] = command
+    maximum_tracking_error = 0.0
+    max_step = max_speed * control_dt
+    for step in range(1, intervals + 1):
+        elapsed = step * control_dt
+        target_index = min(int(elapsed / target_dt), len(targets) - 1)
+        target = targets[target_index]
+        command += np.clip(target - command, -max_step, max_step)
+        commands[step] = command
+        maximum_tracking_error = max(maximum_tracking_error, float(np.max(np.abs(target - command))))
+    return commands, maximum_tracking_error
+
+
+def validate_commands(commands: np.ndarray, frequency: float, max_speed: float) -> float:
+    if not np.isfinite(commands).all():
+        raise ValueError("generated command trajectory contains NaN or Inf")
+    if np.any(commands < RIGHT_ARM_LOWER) or np.any(commands > RIGHT_ARM_UPPER):
+        raise ValueError("generated command trajectory exceeds G1 URDF joint limits")
+    peak_speed = float(np.max(np.abs(np.diff(commands, axis=0))) * frequency)
     if peak_speed > max_speed + 1e-9:
-        raise ValueError(
-            f"trajectory requires {peak_speed:.3f} rad/s, above --max-speed "
-            f"{max_speed:.3f} rad/s; increase --action-dt rather than bypassing the limit"
-        )
+        raise ValueError(f"generated commands require {peak_speed:.6f} rad/s")
     return peak_speed
-
-
-def interpolate_segment(start: np.ndarray, goal: np.ndarray, progress: float) -> np.ndarray:
-    """Linearly interpolate so segment velocity equals the preflight-checked velocity."""
-    return start + np.clip(progress, 0.0, 1.0) * (goal - start)
 
 
 def build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--trajectory", type=Path, default=DEFAULT_TRAJECTORY)
+    parser.add_argument("--aggregation", choices=("temporal-ensemble", "first"), default="temporal-ensemble")
+    parser.add_argument("--slowdown", type=float, default=2.0, help="2.0 means two-times slower than dataset time")
     parser.add_argument("--network-interface", default="enp7s0")
-    parser.add_argument("--frequency", type=float, default=100.0, help="DDS control frequency in Hz")
-    parser.add_argument("--action-dt", type=float, default=0.4, help="seconds between saved action targets")
-    parser.add_argument("--max-speed", type=float, default=0.25, help="hard per-joint playback limit in rad/s")
+    parser.add_argument("--frequency", type=float, default=100.0, help="DDS command frequency in Hz")
+    parser.add_argument("--max-speed", type=float, default=0.25, help="hard command limit in rad/s per joint")
     parser.add_argument("--initial-duration", type=float, default=5.0)
     parser.add_argument("--initial-speed", type=float, default=0.15, help="initialization limit in rad/s")
     parser.add_argument("--initial-tolerance", type=float, default=0.03, help="READY tolerance in rad")
     parser.add_argument("--stable-duration", type=float, default=1.0)
     parser.add_argument(
-        "--lower-body-mode",
-        choices=("damping", "zero-torque"),
-        default="damping",
-        help="damping is the only recommended mode for this suspended playback",
+        "--lower-body-mode", choices=("damping", "zero-torque"), default="damping"
     )
     parser.add_argument("--arm", action="store_true", help="actually release motion mode and publish rt/lowcmd")
     return parser
@@ -117,37 +166,50 @@ def build_argparser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_argparser().parse_args()
     if min(
+        args.slowdown,
         args.frequency,
-        args.action_dt,
         args.max_speed,
         args.initial_duration,
         args.initial_speed,
         args.initial_tolerance,
         args.stable_duration,
     ) <= 0.0:
-        raise SystemExit("all timing, speed, and tolerance arguments must be positive")
+        raise SystemExit("all slowdown, timing, speed, and tolerance arguments must be positive")
 
     trajectory_path = args.trajectory.expanduser().resolve()
     try:
-        initial_pose, trajectory, record = load_trajectory(trajectory_path)
-        peak_speed = check_trajectory_speed(initial_pose, trajectory, args.action_dt, args.max_speed)
+        initial_pose, targets, timestamps, metadata = load_full_episode(
+            trajectory_path, args.aggregation
+        )
+        source_dt = float(np.median(np.diff(timestamps)))
+        target_dt = source_dt * args.slowdown
+        raw_peak_speed = float(np.max(np.abs(np.diff(targets, axis=0))) / target_dt)
+        commands, max_tracking_error = build_rate_limited_commands(
+            initial_pose, targets, target_dt, args.frequency, args.max_speed
+        )
+        command_peak_speed = validate_commands(commands, args.frequency, args.max_speed)
     except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
         raise SystemExit(f"trajectory validation failed: {exc}") from exc
 
+    source_duration = float(timestamps[-1] - timestamps[0])
+    playback_duration = (len(commands) - 1) / args.frequency
     print(f"trajectory: {trajectory_path}")
-    print(f"checkpoint: {record.get('checkpoint', 'unknown')}")
-    print(f"right-arm targets: {len(trajectory)} x 7, action_dt={args.action_dt:.3f}s")
-    print(f"preflight peak segment speed: {peak_speed:.3f} rad/s")
+    print(f"checkpoint: {metadata.get('checkpoint', 'unknown')}")
+    print(f"episode targets: {len(targets)} x 7, aggregation={args.aggregation}")
+    print(f"dataset: dt={source_dt:.4f}s duration={source_duration:.2f}s")
+    print(f"playback: slowdown={args.slowdown:.2f}x dt={target_dt:.4f}s duration={playback_duration:.2f}s")
+    print(f"raw target peak speed: {raw_peak_speed:.3f} rad/s")
+    print(f"rate-limited command peak speed: {command_peak_speed:.3f}/{args.max_speed:.3f} rad/s")
+    print(f"maximum target tracking lag: {max_tracking_error:.3f} rad")
+    print(f"100 Hz commands: {len(commands)} x 7")
     print(f"episode0 input pose: {np.round(initial_pose, 4)}")
-    print(f"first target: {np.round(trajectory[0], 4)}")
-    print(f"last target:  {np.round(trajectory[-1], 4)}")
+    print(f"final command: {np.round(commands[-1], 4)}")
     if not args.arm:
-        print("[DRY RUN] validation passed; no DDS connection was opened and no command was sent")
+        print("[DRY RUN] 最终下发序列检查通过；未连接 DDS，也未发送任何命令")
         return
     if not sys.stdin.isatty():
         raise SystemExit("真机模式必须在交互终端运行，确保 SPACE/Q 急停可用")
 
-    # Keep offline validation independent of robot-only dependencies such as pyzmq.
     from g1_joint_client import G1DDS, RIGHT_ARM_MOTORS
 
     robot = G1DDS(args.network_interface, args.lower_body_mode)
@@ -162,10 +224,8 @@ def main() -> None:
     init_start_time = 0.0
     init_duration = args.initial_duration
     stable_since = None
-    segment_index = 0
-    segment_start = initial_pose.copy()
-    segment_start_time = 0.0
-    final_target = initial_pose.copy()
+    command_index = 0
+    previous_command = commands[0].copy()
 
     print("机器人必须由可靠吊架完全承重。ENTER=解锁并初始化，READY 后 L=播放，SPACE/Q=急停。")
     try:
@@ -183,7 +243,6 @@ def main() -> None:
                 enabled = True
                 init_start = right_q.copy()
                 distance = float(np.max(np.abs(initial_pose - init_start)))
-                # Minimum-jerk peak speed is 1.875 * distance / duration.
                 init_duration = max(args.initial_duration, 1.875 * distance / args.initial_speed)
                 init_start_time = time.monotonic()
                 phase = "INITIALIZING"
@@ -199,42 +258,32 @@ def main() -> None:
                         stable_since = stable_since or time.monotonic()
                         if time.monotonic() - stable_since >= args.stable_duration:
                             phase = "READY"
-                            print(f"[READY] max_error={error:.4f} rad；检查现场后按 L 播放")
+                            print(f"[READY] max_error={error:.4f} rad；检查现场后按 L 连续播放完整轨迹")
                     else:
                         stable_since = None
 
             elif phase == "READY":
                 robot.send_right_arm(initial_pose, measured)
                 if key == "l":
-                    segment_index = 0
-                    segment_start = initial_pose.copy()
-                    segment_start_time = time.monotonic()
+                    command_index = 0
+                    previous_command = commands[0].copy()
                     phase = "PLAYING"
-                    print("[PLAYING] 开始播放右臂轨迹")
+                    print(f"[PLAYING] 开始连续播放 {playback_duration:.2f}s 的完整右臂轨迹")
 
             elif phase == "PLAYING":
-                goal = trajectory[segment_index]
-                progress = (time.monotonic() - segment_start_time) / args.action_dt
-                target = interpolate_segment(segment_start, goal, progress)
-                # Runtime guard remains active even after the complete preflight check.
-                max_step = args.max_speed * period * 1.05
-                if np.max(np.abs(target - final_target)) > max_step:
-                    raise RuntimeError("runtime right-arm speed guard triggered")
-                robot.send_right_arm(target, measured)
-                final_target = target.copy()
-                if progress >= 1.0:
-                    robot.send_right_arm(goal, measured)
-                    final_target = goal.copy()
-                    segment_index += 1
-                    if segment_index >= len(trajectory):
-                        phase = "HOLDING"
-                        print("[DONE] 轨迹播放完成；保持末姿态，按 SPACE/Q 停止")
-                    else:
-                        segment_start = goal.copy()
-                        segment_start_time += args.action_dt
+                command = commands[command_index]
+                runtime_speed = float(np.max(np.abs(command - previous_command)) * args.frequency)
+                if runtime_speed > args.max_speed + 1e-9:
+                    raise RuntimeError(f"runtime command speed guard triggered: {runtime_speed:.6f} rad/s")
+                robot.send_right_arm(command, measured)
+                previous_command = command.copy()
+                command_index += 1
+                if command_index >= len(commands):
+                    phase = "HOLDING"
+                    print("[DONE] 完整轨迹播放完成；保持末姿态，按 SPACE/Q 停止")
 
             elif phase == "HOLDING":
-                robot.send_right_arm(trajectory[-1], measured)
+                robot.send_right_arm(commands[-1], measured)
 
             time.sleep(max(0.0, period - (time.monotonic() - cycle_start)))
     except Exception as exc:
