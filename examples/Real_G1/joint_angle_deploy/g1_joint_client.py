@@ -104,6 +104,18 @@ class PolicyClient:
         return np.asarray(response["data"]["unnormalized_actions"], dtype=np.float64)
 
 
+class _QuietCameraFrameCounter(int):
+    """Keep the SONIC client frame counter while disabling its hard-coded 10-frame print."""
+
+    def __add__(self, other):
+        return _QuietCameraFrameCounter(int(self) + other)
+
+    def __mod__(self, other):
+        if other == 10:
+            return 1
+        return int(self) % other
+
+
 class CameraStream:
     """Continuously capture and optionally display camera frames independently of inference."""
 
@@ -115,6 +127,10 @@ class CameraStream:
             from gear_sonic.camera.composed_camera import ComposedCameraClientSensor
 
             self._robot_client = ComposedCameraClientSensor(server_ip=camera_host, port=camera_port)
+            # gear_sonic prints image latency whenever ``idx % 10 == 0`` with no
+            # verbosity switch. Preserve its counter semantics but disable only
+            # that periodic diagnostic; connection/staleness errors remain visible.
+            self._robot_client.idx = _QuietCameraFrameCounter(self._robot_client.idx)
             print(f"[CAMERA] 使用机器人相机服务 {camera_host}:{camera_port}, stream={camera_name}")
         else:
             self._capture = cv2.VideoCapture(int(source) if source.isdigit() else source)
