@@ -86,6 +86,80 @@ class PolicyClient:
         return np.asarray(response["data"]["unnormalized_actions"], dtype=np.float64)
 
 
+class CameraStream:
+    """Continuously capture and optionally display camera frames independently of inference."""
+
+    def __init__(self, source: str, show: bool):
+        self._capture = cv2.VideoCapture(int(source) if source.isdigit() else source)
+        if not self._capture.isOpened():
+            raise RuntimeError(f"无法打开相机 {source}")
+        self._show = show
+        self._lock = threading.Lock()
+        self._frame = None
+        self._key = None
+        self._phase = "STARTING"
+        self._error = None
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            with self._lock:
+                if self._frame is not None:
+                    return
+                error = self._error
+            if error is not None:
+                raise RuntimeError(error)
+            time.sleep(0.01)
+        raise RuntimeError("camera first frame timed out")
+
+    def _run(self):
+        visible_phases = {"DRY_RUN", "READY", "INFERENCE"}
+        while not self._stop.is_set():
+            ok, frame = self._capture.read()
+            if not ok:
+                with self._lock:
+                    self._error = "camera frame unavailable"
+                return
+            with self._lock:
+                self._frame = frame
+                phase = self._phase
+            if self._show and phase in visible_phases:
+                preview = frame.copy()
+                cv2.rectangle(preview, (12, 10), (preview.shape[1] - 12, 68), (0, 0, 0), -1)
+                cv2.putText(preview, f"G1 CAMERA | {phase}", (24, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (80, 220, 255), 2)
+                cv2.putText(preview, "L: inference   SPACE/Q: E-STOP", (24, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (230, 230, 230), 1)
+                cv2.imshow("G1 Deployment Camera", preview)
+                code = cv2.waitKey(1) & 0xFF
+                if code != 0xFF:
+                    with self._lock:
+                        self._key = chr(code).lower()
+
+    def frame(self) -> np.ndarray:
+        with self._lock:
+            if self._error is not None:
+                raise RuntimeError(self._error)
+            if self._frame is None:
+                raise RuntimeError("camera frame unavailable")
+            return self._frame.copy()
+
+    def read_key(self) -> str | None:
+        with self._lock:
+            key, self._key = self._key, None
+            return key
+
+    def set_phase(self, phase: str):
+        with self._lock:
+            self._phase = phase
+
+    def close(self):
+        self._stop.set()
+        self._thread.join(timeout=1.0)
+        self._capture.release()
+        if self._show:
+            cv2.destroyAllWindows()
+
+
 class G1DDS:
     def __init__(self, network_interface: str, lower_body_mode: str = "damping"):
         from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelPublisher, ChannelSubscriber
@@ -301,6 +375,11 @@ def main():
         help="legs/waist receive no position target; damping is the safer default",
     )
     parser.add_argument("--camera", default="0", help="OpenCV camera index or URL")
+    parser.add_argument(
+        "--view-camera",
+        action="store_true",
+        help="show a live PC camera window in dry-run and after initialization reaches READY",
+    )
     parser.add_argument("--instruction", default="pick up the pipette")
     parser.add_argument("--frequency", type=float, default=10.0)
     parser.add_argument("--execution-horizon", type=int, default=4)
@@ -347,9 +426,7 @@ def main():
 
     robot = G1DDS(args.network_interface, args.lower_body_mode)
     policy = PolicyClient(args.server, args.port, args.timeout_ms)
-    camera = cv2.VideoCapture(int(args.camera) if args.camera.isdigit() else args.camera)
-    if not camera.isOpened():
-        raise SystemExit(f"无法打开相机 {args.camera}")
+    camera = CameraStream(args.camera, args.view_camera)
     estop, period = EStop(), 1.0 / args.frequency
     signal.signal(signal.SIGINT, lambda *_: estop.trigger("Ctrl-C"))
     old_tty = termios.tcgetattr(sys.stdin)
@@ -369,6 +446,7 @@ def main():
     print("SPACE/Q=急停；ENTER=开始抬臂初始化；到达 READY 后按 L 才启动模型。")
     enabled = False
     phase = "DRY_RUN" if not args.arm else "DISARMED"
+    camera.set_phase(phase)
     init_start_q = None
     init_start_left_q = None
     init_start_time = 0.0
@@ -378,7 +456,7 @@ def main():
     try:
         while not estop.latched:
             start = time.monotonic()
-            key = _read_key()
+            key = _read_key() or camera.read_key()
             if key in (" ", "q"):
                 estop.trigger("keyboard")
                 break
@@ -387,9 +465,11 @@ def main():
                 robot.enter_low_level(measured)
                 enabled = True
                 phase = "START_INITIALIZATION"
+                camera.set_phase(phase)
                 print("[ARMED] 已启用 rt/lowcmd，开始移动到初始化姿态；机器人必须可靠吊挂")
             if key == "l" and phase == "READY":
                 phase = "INFERENCE"
+                camera.set_phase(phase)
                 cache = np.empty((0, 13))
                 print("[INFERENCE] 模型已接管右臂")
             measured = robot.state(0.2)
@@ -406,6 +486,7 @@ def main():
                 speed_duration = 1.875 * max_distance / args.initial_speed
                 init_duration = max(args.initial_duration, speed_duration)
                 phase = "INITIALIZING"
+                camera.set_phase(phase)
                 print(f"[INITIALIZING] 预计 {init_duration:.1f}s；插值期间 SPACE/Q 同样有效")
             if phase == "INITIALIZING":
                 progress = (time.monotonic() - init_start_time) / init_duration
@@ -415,6 +496,7 @@ def main():
                 robot.send_inspire_hands(right_hand_state, left_hand_hold)
                 if progress >= 1.0 and np.max(np.abs(arm_q - initial_pose)) <= args.initial_tolerance:
                     phase = "READY"
+                    camera.set_phase(phase)
                     print("[READY] 初始化姿态已到位。检查现场安全后按 L 启动模型")
                 time.sleep(max(0.0, period - (time.monotonic() - start)))
                 continue
@@ -424,9 +506,7 @@ def main():
                     robot.send_inspire_hands(right_hand_state, left_hand_hold)
                 time.sleep(max(0.0, period - (time.monotonic() - start)))
                 continue
-            ok, frame = camera.read()
-            if not ok:
-                raise RuntimeError("camera frame unavailable")
+            frame = camera.frame()
             if len(cache) == 0:
                 image = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), (224, 224))
                 model_state = np.concatenate((arm_q, right_hand_state))
@@ -464,7 +544,7 @@ def main():
         finally:
             robot.stop_low_level_publisher()
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_tty)
-            camera.release()
+            camera.close()
 
 
 if __name__ == "__main__":

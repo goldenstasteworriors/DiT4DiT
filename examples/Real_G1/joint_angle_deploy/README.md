@@ -45,8 +45,8 @@ python test_estop_slow.py --network-interface enp7s0
 `--arm`，并在程序启动后按 Enter 二次解锁：
 
 ```bash
-python g1_joint_client.py --server <A800_1可达IP> --network-interface enp7s0 --camera 0
-python g1_joint_client.py --server <A800_1可达IP> --network-interface enp7s0 --camera 0 --arm
+python g1_joint_client.py --server <A800_1可达IP> --network-interface enp7s0 --camera 0 --view-camera
+python g1_joint_client.py --server <A800_1可达IP> --network-interface enp7s0 --camera 0 --view-camera --arm
 ```
 
 真机启动顺序：
@@ -59,6 +59,10 @@ python g1_joint_client.py --server <A800_1可达IP> --network-interface enp7s0 -
    Inspire 手同步设为 `[0.998, 1, 0.998, 0.998, 0.999, 0.984]`（1 为张开）。
 3. 程序显示 `READY` 后会持续保持初始姿态，但不会查询模型；检查现场后按 `L` 才开始推理。
 4. 初始化和推理期间按 Space/Q 都会锁存急停。
+
+添加 `--view-camera` 后，dry-run 会立即打开 PC 实时相机窗口；正式部署则在初始化完成、
+进入 `READY` 后自动打开。相机采集与显示在独立线程中，A800 推理期间画面仍持续刷新。
+窗口获得焦点时可按 `L` 开始推理，按 Space/Q 急停；终端快捷键同时有效。
 
 默认初始化至少 5 秒且峰值速度不超过 0.15 rad/s。可以显式指定其它训练匹配姿态：
 
