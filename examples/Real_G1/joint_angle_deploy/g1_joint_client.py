@@ -124,7 +124,6 @@ class CameraStream:
         self._show = show
         self._lock = threading.Lock()
         self._frame = None
-        self._key = None
         self._phase = "STARTING"
         self._error = None
         self._stop = threading.Event()
@@ -142,7 +141,6 @@ class CameraStream:
         raise RuntimeError("camera first frame timed out")
 
     def _run(self):
-        visible_phases = {"DRY_RUN", "READY", "INFERENCE"}
         try:
             while not self._stop.is_set():
                 if self._robot_client is not None:
@@ -164,20 +162,9 @@ class CameraStream:
                         raise RuntimeError("local camera frame unavailable")
                 with self._lock:
                     self._frame = frame
-                    phase = self._phase
-                if self._show and phase in visible_phases:
-                    preview = frame.copy()
-                    cv2.rectangle(preview, (12, 10), (preview.shape[1] - 12, 68), (0, 0, 0), -1)
-                    cv2.putText(preview, f"G1 CAMERA | {phase}", (24, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (80, 220, 255), 2)
-                    cv2.putText(preview, "L: inference   SPACE/Q: E-STOP", (24, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (230, 230, 230), 1)
-                    cv2.imshow("G1 Deployment Camera", preview)
-                    code = cv2.waitKey(1) & 0xFF
-                    if code != 0xFF:
-                        with self._lock:
-                            self._key = chr(code).lower()
         except Exception as exc:
             if not self._stop.is_set():
-                message = f"camera/display thread failed: {exc}"
+                message = f"camera capture thread failed: {exc}"
                 print(f"\n[CAMERA ERROR] {message}", flush=True)
                 with self._lock:
                     self._error = message
@@ -194,10 +181,29 @@ class CameraStream:
             return self._frame.copy()
 
     def read_key(self) -> str | None:
+        """Render HighGUI on the main thread and return a camera-window key."""
         with self._lock:
             self._raise_camera_error()
-            key, self._key = self._key, None
-            return key
+            frame = None if self._frame is None else self._frame.copy()
+            phase = self._phase
+        if not self._show or phase not in {"DRY_RUN", "READY", "INFERENCE"} or frame is None:
+            return None
+        try:
+            cv2.rectangle(frame, (12, 10), (frame.shape[1] - 12, 68), (0, 0, 0), -1)
+            cv2.putText(frame, f"G1 CAMERA | {phase}", (24, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (80, 220, 255), 2)
+            cv2.putText(frame, "L: inference   SPACE/Q: E-STOP", (24, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (230, 230, 230), 1)
+            cv2.imshow("G1 Deployment Camera", frame)
+            code = cv2.waitKey(1) & 0xFF
+        except Exception as exc:
+            message = f"camera display failed: {exc}"
+            with self._lock:
+                self._error = message
+            raise RuntimeError(message) from exc
+        return None if code == 0xFF else chr(code).lower()
+
+    @property
+    def preview_enabled(self) -> bool:
+        return self._show
 
     def set_phase(self, phase: str):
         with self._lock:
@@ -699,6 +705,10 @@ def main():
                         phase = "READY"
                         camera.set_phase(phase)
                         print("[READY] 双臂和双手初始化姿态已到位。检查现场安全后按 L 启动模型")
+                        if camera.preview_enabled:
+                            print("[CAMERA] 正在 PC 主线程打开机器人 ego_view 预览窗口")
+                        else:
+                            print("[CAMERA] 未启用预览；重新启动时请添加 --view-camera")
                         print(
                             "  left wrist  target/measured/error: "
                             f"{np.round(initial_left_pose[4:7], 4)} / "
