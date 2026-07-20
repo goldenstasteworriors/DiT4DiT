@@ -69,8 +69,13 @@ class PolicyClient:
     def predict(self, image: np.ndarray, state: np.ndarray, instruction: str) -> np.ndarray:
         data = {"examples": [{"image": [image], "lang": instruction, "state": state[None]}]}
         request = {"endpoint": "get_action", "data": data}
-        self.socket.send(msgpack.packb(request, default=_pack_array))
-        response = msgpack.unpackb(self.socket.recv(), object_hook=_unpack_array)
+        try:
+            self.socket.send(msgpack.packb(request, default=_pack_array))
+            response = msgpack.unpackb(self.socket.recv(), object_hook=_unpack_array)
+        except zmq.Again as exc:
+            raise TimeoutError(
+                "ZMQ inference timed out; check A800 server logs, SSH tunnel, and --timeout-ms"
+            ) from exc
         if not response.get("ok"):
             raise RuntimeError(str(response.get("error")))
         return np.asarray(response["data"]["unnormalized_actions"], dtype=np.float64)
@@ -267,7 +272,12 @@ def main():
         default=DEFAULT_INITIAL_RIGHT_HAND.tolist(),
         help="episode-0 Inspire-hand initial state and 13-D model input state",
     )
-    parser.add_argument("--timeout-ms", type=int, default=5000)
+    parser.add_argument(
+        "--timeout-ms",
+        type=int,
+        default=15000,
+        help="ZMQ send/receive timeout; includes first-inference CUDA warm-up",
+    )
     parser.add_argument("--arm", action="store_true", help="actually publish rt/lowcmd")
     args = parser.parse_args()
     if not sys.stdin.isatty():
