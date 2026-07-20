@@ -217,8 +217,27 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--max-speed", type=float, default=0.25, help="hard command limit in rad/s per joint")
     parser.add_argument("--initial-duration", type=float, default=8.0)
     parser.add_argument("--initial-speed", type=float, default=0.1, help="initialization limit in rad/s")
-    parser.add_argument("--initial-tolerance", type=float, default=0.03, help="READY tolerance in rad")
-    parser.add_argument("--stable-duration", type=float, default=1.0)
+    parser.add_argument("--initial-tolerance", type=float, default=0.01, help="READY tolerance in rad")
+    parser.add_argument(
+        "--initial-correction-rate", type=float, default=1.0,
+        help="post-interpolation outer-loop correction rate in 1/s",
+    )
+    parser.add_argument(
+        "--initial-correction-speed", type=float, default=0.03,
+        help="maximum correction-offset change speed in rad/s",
+    )
+    parser.add_argument(
+        "--initial-correction-limit", type=float, default=0.15,
+        help="maximum outer-loop position offset per joint in rad",
+    )
+    parser.add_argument(
+        "--initial-correction-deadband", type=float, default=0.003,
+        help="do not integrate smaller initialization errors",
+    )
+    parser.add_argument(
+        "--initial-stable-duration", "--stable-duration", dest="initial_stable_duration",
+        type=float, default=1.0, help="required continuous in-tolerance time before READY",
+    )
     parser.add_argument(
         "--lower-body-mode", choices=("damping", "zero-torque"), default="damping"
     )
@@ -235,9 +254,18 @@ def main() -> None:
         args.initial_duration,
         args.initial_speed,
         args.initial_tolerance,
-        args.stable_duration,
     ) <= 0.0:
         raise SystemExit("all slowdown, timing, speed, and tolerance arguments must be positive")
+    if min(
+        args.initial_correction_rate,
+        args.initial_correction_speed,
+        args.initial_correction_limit,
+        args.initial_correction_deadband,
+        args.initial_stable_duration,
+    ) < 0.0:
+        raise SystemExit("initial correction and stable-duration arguments must be non-negative")
+    if args.initial_correction_deadband >= args.initial_tolerance:
+        raise SystemExit("--initial-correction-deadband must be smaller than --initial-tolerance")
 
     try:
         trajectory_path = resolve_trajectory(args.episode, args.trajectory)
@@ -278,7 +306,12 @@ def main() -> None:
     if not sys.stdin.isatty():
         raise SystemExit("真机模式必须在交互终端运行，确保 SPACE/Q 急停可用")
 
-    from g1_joint_client import G1DDS, LEFT_ARM_MOTORS, RIGHT_ARM_MOTORS
+    from g1_joint_client import (
+        G1DDS,
+        LEFT_ARM_MOTORS,
+        RIGHT_ARM_MOTORS,
+        _update_pose_correction,
+    )
 
     robot = G1DDS(args.network_interface, args.lower_body_mode)
     estop = EStop()
@@ -293,6 +326,10 @@ def main() -> None:
     init_start_time = 0.0
     init_duration = args.initial_duration
     stable_since = None
+    last_init_status_time = 0.0
+    left_init_correction = np.zeros(7, dtype=np.float64)
+    right_init_correction = np.zeros(7, dtype=np.float64)
+    left_hold = initial_left_pose.copy()
     command_index = 0
     previous_command = commands[0].copy()
 
@@ -319,6 +356,9 @@ def main() -> None:
                 )
                 init_duration = max(args.initial_duration, 1.875 * distance / args.initial_speed)
                 init_start_time = time.monotonic()
+                stable_since = None
+                left_init_correction.fill(0.0)
+                right_init_correction.fill(0.0)
                 phase = "INITIALIZING"
                 print(f"[ARMED] 双臂开始移动到 episode {args.episode} 输入姿态，预计 {init_duration:.1f}s")
 
@@ -326,22 +366,77 @@ def main() -> None:
                 progress = (time.monotonic() - init_start_time) / init_duration
                 target = minimum_jerk(init_start, initial_pose, progress)
                 left_target = minimum_jerk(init_start_left, initial_left_pose, progress)
-                robot.send_arms(left_target, target)
                 if progress >= 1.0:
+                    left_error = initial_left_pose - left_q
+                    right_error = initial_pose - right_q
+                    left_init_correction = _update_pose_correction(
+                        left_init_correction,
+                        left_error,
+                        period,
+                        args.initial_correction_rate,
+                        args.initial_correction_speed,
+                        args.initial_correction_limit,
+                        args.initial_correction_deadband,
+                    )
+                    right_init_correction = _update_pose_correction(
+                        right_init_correction,
+                        right_error,
+                        period,
+                        args.initial_correction_rate,
+                        args.initial_correction_speed,
+                        args.initial_correction_limit,
+                        args.initial_correction_deadband,
+                    )
+                    left_target = np.clip(
+                        initial_left_pose + left_init_correction, LEFT_ARM_LOWER, LEFT_ARM_UPPER
+                    )
+                    target = np.clip(
+                        initial_pose + right_init_correction, RIGHT_ARM_LOWER, RIGHT_ARM_UPPER
+                    )
                     error = max(
-                        float(np.max(np.abs(initial_pose - right_q))),
-                        float(np.max(np.abs(initial_left_pose - left_q))),
+                        float(np.max(np.abs(right_error))),
+                        float(np.max(np.abs(left_error))),
                     )
                     if error <= args.initial_tolerance:
                         stable_since = stable_since or time.monotonic()
-                        if time.monotonic() - stable_since >= args.stable_duration:
+                        if time.monotonic() - stable_since >= args.initial_stable_duration:
                             phase = "READY"
                             print(f"[READY] max_error={error:.4f} rad；检查现场后按 L 连续播放完整轨迹")
                     else:
                         stable_since = None
+                    now = time.monotonic()
+                    if now - last_init_status_time >= 1.0:
+                        stable_duration = 0.0 if stable_since is None else now - stable_since
+                        print(
+                            f"[INITIALIZING] max_error={error:.4f}rad | "
+                            f"L-wrist err={np.round(left_error[4:7], 4)} | "
+                            f"R-wrist err={np.round(right_error[4:7], 4)} | "
+                            f"correction_max={max(np.max(np.abs(left_init_correction)), np.max(np.abs(right_init_correction))):.4f}rad | "
+                            f"stable={stable_duration:.1f}/{args.initial_stable_duration:.1f}s"
+                        )
+                        last_init_status_time = now
+                robot.send_arms(left_target, target)
 
             elif phase == "READY":
-                robot.send_arms(initial_left_pose, initial_pose)
+                left_error = initial_left_pose - left_q
+                right_error = initial_pose - right_q
+                left_init_correction = _update_pose_correction(
+                    left_init_correction, left_error, period, args.initial_correction_rate,
+                    args.initial_correction_speed, args.initial_correction_limit,
+                    args.initial_correction_deadband,
+                )
+                right_init_correction = _update_pose_correction(
+                    right_init_correction, right_error, period, args.initial_correction_rate,
+                    args.initial_correction_speed, args.initial_correction_limit,
+                    args.initial_correction_deadband,
+                )
+                left_hold = np.clip(
+                    initial_left_pose + left_init_correction, LEFT_ARM_LOWER, LEFT_ARM_UPPER
+                )
+                right_hold = np.clip(
+                    initial_pose + right_init_correction, RIGHT_ARM_LOWER, RIGHT_ARM_UPPER
+                )
+                robot.send_arms(left_hold, right_hold)
                 if key == "l":
                     command_index = 0
                     previous_command = commands[0].copy()
@@ -353,7 +448,7 @@ def main() -> None:
                 runtime_speed = float(np.max(np.abs(command - previous_command)) * args.frequency)
                 if runtime_speed > args.max_speed + 1e-9:
                     raise RuntimeError(f"runtime command speed guard triggered: {runtime_speed:.6f} rad/s")
-                robot.send_arms(initial_left_pose, command)
+                robot.send_arms(left_hold, command)
                 previous_command = command.copy()
                 command_index += 1
                 if command_index >= len(commands):
@@ -361,7 +456,7 @@ def main() -> None:
                     print("[DONE] 完整轨迹播放完成；保持末姿态，按 SPACE/Q 停止")
 
             elif phase == "HOLDING":
-                robot.send_arms(initial_left_pose, commands[-1])
+                robot.send_arms(left_hold, commands[-1])
 
             time.sleep(max(0.0, period - (time.monotonic() - cycle_start)))
     except Exception as exc:

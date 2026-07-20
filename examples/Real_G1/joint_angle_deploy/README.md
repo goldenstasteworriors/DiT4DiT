@@ -159,6 +159,10 @@ conda run --no-capture-output -n decoupled_vla_collection python \
 生成最终100 Hz命令序列。每周期变化被硬限制为0.25 rad/s，随后再次检查 NaN/Inf、URDF
 限位和最终命令峰值；任何检查失败都会在连接 DDS 前退出。先以 minimum-jerk 插值将
 左右臂同步移动到对应 episode 的首帧输入姿态，到达 `READY` 后必须按 `L` 才连续播放完整轨迹。
+minimum-jerk 插值结束后，初始化使用与在线部署相同的双臂外环误差修正：默认积分率
+`1.0/s`、修正速度上限 `0.03 rad/s`、修正偏置上限 `0.15 rad`、死区 `0.003 rad`，
+所有关节误差需连续1秒保持在 `0.01 rad` 内才进入 `READY`。内环使用
+`g1_joint_client.py` 中相同的手臂 Kp/Kd。
 播放完成后保持末姿态。
 任意阶段按 Space/Q 或 Ctrl-C 都会锁存急停，
 短暂保持触发时的实测角后停止发布。腿和腰默认只使用速度阻尼，不提供主动平衡能力。
