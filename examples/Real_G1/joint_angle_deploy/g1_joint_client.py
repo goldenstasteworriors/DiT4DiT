@@ -107,8 +107,12 @@ class G1DDS:
         self._mode_machine = 0
         self._stamp = 0.0
         self._lock = threading.Lock()
+        self._command_lock = threading.Lock()
         self._low_level_enabled = False
         self._left_arm_hold = None
+        self._right_arm_target = None
+        self._publisher_stop = threading.Event()
+        self._publisher_thread = None
         self._motion_switcher = MotionSwitcherClient()
         self._motion_switcher.SetTimeout(5.0)
         self._motion_switcher.Init()
@@ -165,12 +169,40 @@ class G1DDS:
         if result.get("name"):
             raise RuntimeError(f"failed to release active motion mode: {result}")
         self._left_arm_hold = measured[LEFT_ARM_MOTORS].copy()
+        self._right_arm_target = measured[RIGHT_ARM_MOTORS].copy()
         self._low_level_enabled = True
+        self._publisher_stop.clear()
+        self._publisher_thread = threading.Thread(target=self._publish_loop, daemon=True)
+        self._publisher_thread.start()
         print(f"[LOW LEVEL] rt/lowcmd enabled; lower body={self._lower_body_mode}")
 
     def send_right_arm(self, target: np.ndarray, measured: np.ndarray):
         if not self._low_level_enabled or self._left_arm_hold is None:
             raise RuntimeError("low-level control is not enabled")
+        target = np.asarray(target, dtype=np.float64)
+        if target.shape != (7,) or not np.isfinite(target).all():
+            raise ValueError("right-arm target must contain 7 finite values")
+        with self._command_lock:
+            self._right_arm_target = target.copy()
+
+    def _publish_loop(self):
+        """Keep rt/lowcmd alive at 100 Hz while inference runs asynchronously on the main thread."""
+        period = 0.01
+        while not self._publisher_stop.is_set():
+            start = time.monotonic()
+            try:
+                self._write_lowcmd()
+            except Exception as exc:
+                print(f"\n[LOWCMD ERROR] {exc}", flush=True)
+                self._publisher_stop.set()
+                return
+            self._publisher_stop.wait(max(0.0, period - (time.monotonic() - start)))
+
+    def _write_lowcmd(self):
+        with self._command_lock:
+            if self._right_arm_target is None:
+                return
+            target = self._right_arm_target.copy()
         self._cmd.level_flag = 0xFF
         self._cmd.mode_pr = 0
         self._cmd.mode_machine = self._mode_machine
@@ -199,6 +231,11 @@ class G1DDS:
                 motor.kd = float(ARM_KD[arm_index])
         self._cmd.crc = self._crc.Crc(self._cmd)
         self._publisher.Write(self._cmd)
+
+    def stop_low_level_publisher(self):
+        self._publisher_stop.set()
+        if self._publisher_thread is not None:
+            self._publisher_thread.join(timeout=1.0)
 
     def send_inspire_hands(self, right_target: np.ndarray, left_target: np.ndarray):
         """Publish normalized Inspire commands; bridge order is right 6 then left 6."""
@@ -387,6 +424,7 @@ def main():
                     robot.send_inspire_hands(right_hand_state, left_hand_hold)
                     time.sleep(0.01)
         finally:
+            robot.stop_low_level_publisher()
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_tty)
             camera.release()
 

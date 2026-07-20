@@ -53,6 +53,7 @@ def main():
             for _ in range(20):
                 robot.send_right_arm(measured[RIGHT_ARM_MOTORS], measured)
                 time.sleep(0.01)
+        robot.stop_low_level_publisher()
         termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_tty)
 
 
