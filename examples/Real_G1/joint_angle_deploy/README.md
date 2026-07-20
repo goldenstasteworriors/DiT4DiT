@@ -122,3 +122,35 @@ NaN/形状检查、URDF 硬限位、
 0.25 rad/s 手臂速度限制、0.5/s 灵巧手归一化速度限制；任何异常都会切换为手臂实测
 位置保持与灵巧手最后命令保持。独立的 100 Hz 发布线程会在 A800 推理期间持续发布
 最后一个安全 `rt/lowcmd`，避免远程推理造成低层命令断流。
+
+## 6. 播放已保存的右臂轨迹
+
+`play_right_arm_trajectory.py` 读取推理结果 JSON，只控制 G1 右臂，不发布
+`rt/inspire/cmd`。因此灵巧手可以由单独的 DDS/Modbus bridge 运行用户指定的任务：
+
+```bash
+python decoupled_wbc/scripts/inspire_modbus_hand.py --mode dds \
+  --network enp7s0 --hand-task grab_pipette \
+  --hand-task-config gear_sonic/config/data_collection/inspire_hand_tasks.json \
+  --profile-timing
+```
+
+先离线检查轨迹的形状、有限值、URDF 限位和相邻目标速度；此命令不连接 DDS：
+
+```bash
+python examples/Real_G1/joint_angle_deploy/play_right_arm_trajectory.py
+```
+
+确认 G1 已由可靠吊架完全承重、灵巧手 bridge 正常后，再启用真机下发：
+
+```bash
+python examples/Real_G1/joint_angle_deploy/play_right_arm_trajectory.py \
+  --network-interface enp7s0 --arm
+```
+
+脚本默认读取 `inference_records/joints_steps_52000_episode_000000_result.json`，先以
+minimum-jerk 插值移动到 JSON 保存的 episode0 输入右臂姿态。到达 `READY` 后必须按 `L`
+才播放 16 步轨迹。默认每步 0.4 秒，使这条轨迹的峰值关节速度不超过 0.25 rad/s；
+若通过 `--action-dt` 加速后超过限制，脚本会在连接机器人前拒绝运行。播放完成后保持末姿态。
+任意阶段按 Space/Q 或 Ctrl-C 都会锁存急停，
+短暂保持触发时的实测角后停止发布。腿和腰默认只使用速度阻尼，不提供主动平衡能力。
