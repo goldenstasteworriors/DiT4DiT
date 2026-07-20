@@ -33,7 +33,9 @@ if [[ ! -d "${DATA_ROOT}/pick_up_pipette_right_wrist_delta" ]]; then
 fi
 
 # shellcheck disable=SC1090
+set +u
 source "${PPU_ENV_SETUP}"
+set -u
 export UMD_PLATFORM_TYPE=1
 export HGGC_DRIVER_CANDIDATE=UMD
 
