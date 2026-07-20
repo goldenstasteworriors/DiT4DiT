@@ -2,9 +2,8 @@
 
 The full inference NPZ contains one 16-step prediction chunk per observation.
 This script causally ensembles overlapping chunks, plays targets two times
-slower than the dataset by default, and precomputes the exact 100 Hz command
-sequence with a hard per-joint speed limit before any DDS connection is opened.
-The Inspire hand is intentionally not commanded here.
+slower than the dataset by default, and precomputes rate-limited right-arm and
+right-Inspire-hand command sequences before any DDS connection is opened.
 """
 
 from __future__ import annotations
@@ -92,6 +91,20 @@ def temporal_ensemble(action_chunks: np.ndarray) -> np.ndarray:
     return result
 
 
+def temporal_ensemble_hand(action_chunks: np.ndarray) -> np.ndarray:
+    """Average the right-hand part of all past chunks predicting each timestep."""
+    episode_length, horizon, _ = action_chunks.shape
+    result = np.empty((episode_length, 6), dtype=np.float64)
+    for timestep in range(episode_length):
+        first_source = max(0, timestep - horizon + 1)
+        predictions = [
+            action_chunks[source, timestep - source, 7:13]
+            for source in range(first_source, timestep + 1)
+        ]
+        result[timestep] = np.mean(predictions, axis=0)
+    return result
+
+
 def load_full_episode(path: Path, aggregation: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
     with np.load(path) as data:
         required = {"timestamps", "input_states", "predicted_action_chunks", "first_predicted_actions"}
@@ -133,10 +146,29 @@ def load_full_episode(path: Path, aggregation: str) -> tuple[np.ndarray, np.ndar
     return initial_pose, targets, timestamps, metadata
 
 
-def load_episode_arm_initials(
-    dataset_root: Path, episode: int, inferred_right_pose: np.ndarray
-) -> tuple[np.ndarray, np.ndarray, Path]:
-    """Read both arm poses from the corresponding raw episode's first observation."""
+def load_hand_trajectory(path: Path, aggregation: str) -> tuple[np.ndarray, np.ndarray]:
+    with np.load(path) as data:
+        input_states = np.asarray(data["input_states"], dtype=np.float64)
+        chunks = np.asarray(data["predicted_action_chunks"], dtype=np.float64)
+        first_actions = np.asarray(data["first_predicted_actions"], dtype=np.float64)
+    targets = (
+        temporal_ensemble_hand(chunks)
+        if aggregation == "temporal-ensemble"
+        else first_actions[:, 7:13].copy()
+    )
+    initial_state = input_states[0, 7:13].copy()
+    if not np.isfinite(targets).all() or np.any(targets < 0.0) or np.any(targets > 1.0):
+        raise ValueError("predicted right-hand targets must be finite normalized values in [0, 1]")
+    return initial_state, targets
+
+
+def load_episode_initials(
+    dataset_root: Path,
+    episode: int,
+    inferred_right_pose: np.ndarray,
+    inferred_right_hand: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, Path]:
+    """Read corresponding raw first-frame arm/hand states and hand commands."""
     import pandas as pd
 
     dataset_root = dataset_root.expanduser().resolve()
@@ -146,22 +178,48 @@ def load_episode_arm_initials(
             f"expected one raw parquet for episode {episode}, found {len(matches)} under {dataset_root}"
         )
     parquet = matches[0]
-    frame = pd.read_parquet(parquet, columns=["observation.state"])
+    frame = pd.read_parquet(parquet, columns=["observation.state", "action.wbc"])
     if frame.empty:
         raise ValueError(f"raw episode contains no frames: {parquet}")
     state = np.asarray(frame.iloc[0]["observation.state"], dtype=np.float64)
-    if state.shape != (41,) or not np.isfinite(state).all():
-        raise ValueError(f"expected finite 41-D observation.state, got {state.shape}")
+    action = np.asarray(frame.iloc[0]["action.wbc"], dtype=np.float64)
+    if state.shape != (41,) or action.shape != (41,) or not np.isfinite(state).all() or not np.isfinite(action).all():
+        raise ValueError(f"expected finite 41-D observation.state/action.wbc, got {state.shape}/{action.shape}")
     left_pose = state[15:22].copy()
     right_pose = state[22:29].copy()
+    left_hand_state = state[29:35].copy()
+    right_hand_state = state[35:41].copy()
+    left_hand_command = action[29:35].copy()
+    right_hand_command = action[35:41].copy()
     if not np.allclose(right_pose, inferred_right_pose, atol=1e-5, rtol=0.0):
         mismatch = float(np.max(np.abs(right_pose - inferred_right_pose)))
         raise ValueError(
             f"raw/inference episode mismatch: initial right-arm difference is {mismatch:.6f} rad"
         )
+    if not np.allclose(right_hand_state, inferred_right_hand, atol=1e-5, rtol=0.0):
+        mismatch = float(np.max(np.abs(right_hand_state - inferred_right_hand)))
+        raise ValueError(
+            f"raw/inference episode mismatch: initial right-hand difference is {mismatch:.6f}"
+        )
     if np.any(left_pose < LEFT_ARM_LOWER) or np.any(left_pose > LEFT_ARM_UPPER):
         raise ValueError("raw initial left-arm pose exceeds G1 URDF joint limits")
-    return left_pose, right_pose, parquet
+    for name, values in (
+        ("left hand state", left_hand_state),
+        ("right hand state", right_hand_state),
+        ("left hand command", left_hand_command),
+        ("right hand command", right_hand_command),
+    ):
+        if np.any(values < 0.0) or np.any(values > 1.0):
+            raise ValueError(f"raw {name} must be normalized to [0, 1]")
+    return (
+        left_pose,
+        right_pose,
+        left_hand_state,
+        right_hand_state,
+        left_hand_command,
+        right_hand_command,
+        parquet,
+    )
 
 
 def build_rate_limited_commands(
@@ -174,7 +232,7 @@ def build_rate_limited_commands(
     """Simulate the exact target follower used for real-robot command playback."""
     control_dt = 1.0 / control_frequency
     intervals = int(np.ceil((len(targets) - 1) * target_dt * control_frequency))
-    commands = np.empty((intervals + 1, 7), dtype=np.float64)
+    commands = np.empty((intervals + 1, initial_pose.size), dtype=np.float64)
     command = initial_pose.copy()
     commands[0] = command
     maximum_tracking_error = 0.0
@@ -200,6 +258,17 @@ def validate_commands(commands: np.ndarray, frequency: float, max_speed: float) 
     return peak_speed
 
 
+def validate_hand_commands(commands: np.ndarray, frequency: float, max_speed: float) -> float:
+    if commands.ndim != 2 or commands.shape[1] != 6 or not np.isfinite(commands).all():
+        raise ValueError(f"generated Inspire commands must be finite [T,6], got {commands.shape}")
+    if np.any(commands < 0.0) or np.any(commands > 1.0):
+        raise ValueError("generated Inspire commands exceed normalized limits [0, 1]")
+    peak_speed = float(np.max(np.abs(np.diff(commands, axis=0))) * frequency)
+    if peak_speed > max_speed + 1e-9:
+        raise ValueError(f"generated Inspire commands require {peak_speed:.6f} normalized units/s")
+    return peak_speed
+
+
 def build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--episode", type=int, default=0, help="episode selected from inference_records")
@@ -215,9 +284,12 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--network-interface", default="enp7s0")
     parser.add_argument("--frequency", type=float, default=100.0, help="DDS command frequency in Hz")
     parser.add_argument("--max-speed", type=float, default=0.25, help="hard command limit in rad/s per joint")
+    parser.add_argument("--max-hand-speed", type=float, default=0.5, help="right-hand limit in normalized units/s")
+    parser.add_argument("--hand-frequency", type=float, default=10.0, help="rt/inspire/cmd publish frequency in Hz")
     parser.add_argument("--initial-duration", type=float, default=8.0)
     parser.add_argument("--initial-speed", type=float, default=0.1, help="initialization limit in rad/s")
     parser.add_argument("--initial-tolerance", type=float, default=0.01, help="READY tolerance in rad")
+    parser.add_argument("--initial-hand-tolerance", type=float, default=0.02)
     parser.add_argument(
         "--initial-correction-rate", type=float, default=1.0,
         help="post-interpolation outer-loop correction rate in 1/s",
@@ -251,9 +323,12 @@ def main() -> None:
         args.slowdown,
         args.frequency,
         args.max_speed,
+        args.max_hand_speed,
+        args.hand_frequency,
         args.initial_duration,
         args.initial_speed,
         args.initial_tolerance,
+        args.initial_hand_tolerance,
     ) <= 0.0:
         raise SystemExit("all slowdown, timing, speed, and tolerance arguments must be positive")
     if min(
@@ -266,14 +341,30 @@ def main() -> None:
         raise SystemExit("initial correction and stable-duration arguments must be non-negative")
     if args.initial_correction_deadband >= args.initial_tolerance:
         raise SystemExit("--initial-correction-deadband must be smaller than --initial-tolerance")
+    hand_stride = round(args.frequency / args.hand_frequency)
+    if args.hand_frequency > args.frequency or not np.isclose(
+        hand_stride * args.hand_frequency, args.frequency
+    ):
+        raise SystemExit("--frequency must be an integer multiple of --hand-frequency")
 
     try:
         trajectory_path = resolve_trajectory(args.episode, args.trajectory)
         initial_pose, targets, timestamps, metadata = load_full_episode(
             trajectory_path, args.aggregation
         )
-        initial_left_pose, initial_pose, initial_parquet = load_episode_arm_initials(
-            args.dataset, args.episode, initial_pose
+        inferred_right_hand, hand_targets = load_hand_trajectory(
+            trajectory_path, args.aggregation
+        )
+        (
+            initial_left_pose,
+            initial_pose,
+            initial_left_hand_state,
+            initial_right_hand_state,
+            initial_left_hand_command,
+            initial_right_hand_command,
+            initial_parquet,
+        ) = load_episode_initials(
+            args.dataset, args.episode, initial_pose, inferred_right_hand
         )
         source_dt = float(np.median(np.diff(timestamps)))
         target_dt = source_dt * args.slowdown
@@ -282,6 +373,16 @@ def main() -> None:
             initial_pose, targets, target_dt, args.frequency, args.max_speed
         )
         command_peak_speed = validate_commands(commands, args.frequency, args.max_speed)
+        hand_commands, hand_tracking_error = build_rate_limited_commands(
+            initial_right_hand_command,
+            hand_targets,
+            target_dt,
+            args.frequency,
+            args.max_hand_speed,
+        )
+        hand_peak_speed = validate_hand_commands(
+            hand_commands, args.frequency, args.max_hand_speed
+        )
     except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
         raise SystemExit(f"trajectory validation failed: {exc}") from exc
 
@@ -296,9 +397,16 @@ def main() -> None:
     print(f"rate-limited command peak speed: {command_peak_speed:.3f}/{args.max_speed:.3f} rad/s")
     print(f"maximum target tracking lag: {max_tracking_error:.3f} rad")
     print(f"100 Hz commands: {len(commands)} x 7")
+    print(
+        f"right-hand peak speed: {hand_peak_speed:.3f}/{args.max_hand_speed:.3f} normalized/s; "
+        f"maximum tracking lag: {hand_tracking_error:.3f}"
+    )
+    print(f"right-hand commands: {len(hand_commands)} x 6; DDS publish={args.hand_frequency:.1f} Hz")
     print(f"episode {args.episode} input pose: {np.round(initial_pose, 4)}")
     print(f"raw initial state: {initial_parquet}")
     print(f"episode {args.episode} left input pose: {np.round(initial_left_pose, 4)}")
+    print(f"episode {args.episode} right/left hand states: {np.round(initial_right_hand_state, 4)} / {np.round(initial_left_hand_state, 4)}")
+    print(f"episode {args.episode} right/left hand commands: {np.round(initial_right_hand_command, 4)} / {np.round(initial_left_hand_command, 4)}")
     print(f"final command: {np.round(commands[-1], 4)}")
     if not args.arm:
         print("[DRY RUN] 最终下发序列检查通过；未连接 DDS，也未发送任何命令")
@@ -323,6 +431,8 @@ def main() -> None:
     phase = "DISARMED"
     init_start = np.zeros(7)
     init_start_left = np.zeros(7)
+    init_start_right_hand = np.zeros(6)
+    init_start_left_hand = np.zeros(6)
     init_start_time = 0.0
     init_duration = args.initial_duration
     stable_since = None
@@ -332,6 +442,9 @@ def main() -> None:
     left_hold = initial_left_pose.copy()
     command_index = 0
     previous_command = commands[0].copy()
+    right_hand_command = initial_right_hand_command.copy()
+    left_hand_command = initial_left_hand_command.copy()
+    cycle_index = 0
 
     print("机器人必须由可靠吊架完全承重。ENTER=解锁并初始化，READY 后 L=播放，SPACE/Q=急停。")
     try:
@@ -346,6 +459,7 @@ def main() -> None:
             left_q = measured[LEFT_ARM_MOTORS]
             right_q = measured[RIGHT_ARM_MOTORS]
             if key in ("\n", "\r") and phase == "DISARMED":
+                init_start_right_hand, init_start_left_hand = robot.hand_state(0.5)
                 robot.enter_low_level(measured)
                 enabled = True
                 init_start = right_q.copy()
@@ -366,6 +480,12 @@ def main() -> None:
                 progress = (time.monotonic() - init_start_time) / init_duration
                 target = minimum_jerk(init_start, initial_pose, progress)
                 left_target = minimum_jerk(init_start_left, initial_left_pose, progress)
+                right_hand_command = minimum_jerk(
+                    init_start_right_hand, initial_right_hand_command, progress
+                )
+                left_hand_command = minimum_jerk(
+                    init_start_left_hand, initial_left_hand_command, progress
+                )
                 if progress >= 1.0:
                     left_error = initial_left_pose - left_q
                     right_error = initial_pose - right_q
@@ -397,7 +517,12 @@ def main() -> None:
                         float(np.max(np.abs(right_error))),
                         float(np.max(np.abs(left_error))),
                     )
-                    if error <= args.initial_tolerance:
+                    right_hand_measured, left_hand_measured = robot.hand_state(0.5)
+                    hand_error = max(
+                        float(np.max(np.abs(initial_right_hand_state - right_hand_measured))),
+                        float(np.max(np.abs(initial_left_hand_state - left_hand_measured))),
+                    )
+                    if error <= args.initial_tolerance and hand_error <= args.initial_hand_tolerance:
                         stable_since = stable_since or time.monotonic()
                         if time.monotonic() - stable_since >= args.initial_stable_duration:
                             phase = "READY"
@@ -409,6 +534,7 @@ def main() -> None:
                         stable_duration = 0.0 if stable_since is None else now - stable_since
                         print(
                             f"[INITIALIZING] max_error={error:.4f}rad | "
+                            f"hand_error={hand_error:.4f} | "
                             f"L-wrist err={np.round(left_error[4:7], 4)} | "
                             f"R-wrist err={np.round(right_error[4:7], 4)} | "
                             f"correction_max={max(np.max(np.abs(left_init_correction)), np.max(np.abs(right_init_correction))):.4f}rad | "
@@ -416,6 +542,8 @@ def main() -> None:
                         )
                         last_init_status_time = now
                 robot.send_arms(left_target, target)
+                if cycle_index % hand_stride == 0:
+                    robot.send_inspire_hands(right_hand_command, left_hand_command)
 
             elif phase == "READY":
                 left_error = initial_left_pose - left_q
@@ -437,27 +565,36 @@ def main() -> None:
                     initial_pose + right_init_correction, RIGHT_ARM_LOWER, RIGHT_ARM_UPPER
                 )
                 robot.send_arms(left_hold, right_hold)
+                if cycle_index % hand_stride == 0:
+                    robot.send_inspire_hands(right_hand_command, left_hand_command)
                 if key == "l":
                     command_index = 0
                     previous_command = commands[0].copy()
+                    right_hand_command = hand_commands[0].copy()
                     phase = "PLAYING"
-                    print(f"[PLAYING] 开始连续播放 {playback_duration:.2f}s 的完整右臂轨迹")
+                    print(f"[PLAYING] 开始连续播放 {playback_duration:.2f}s 的完整右臂和右手轨迹")
 
             elif phase == "PLAYING":
                 command = commands[command_index]
+                right_hand_command = hand_commands[command_index]
                 runtime_speed = float(np.max(np.abs(command - previous_command)) * args.frequency)
                 if runtime_speed > args.max_speed + 1e-9:
                     raise RuntimeError(f"runtime command speed guard triggered: {runtime_speed:.6f} rad/s")
                 robot.send_arms(left_hold, command)
+                if cycle_index % hand_stride == 0:
+                    robot.send_inspire_hands(right_hand_command, left_hand_command)
                 previous_command = command.copy()
                 command_index += 1
                 if command_index >= len(commands):
                     phase = "HOLDING"
-                    print("[DONE] 完整轨迹播放完成；保持末姿态，按 SPACE/Q 停止")
+                    print("[DONE] 完整右臂和右手轨迹播放完成；保持末姿态，按 SPACE/Q 停止")
 
             elif phase == "HOLDING":
                 robot.send_arms(left_hold, commands[-1])
+                if cycle_index % hand_stride == 0:
+                    robot.send_inspire_hands(hand_commands[-1], left_hand_command)
 
+            cycle_index += 1
             time.sleep(max(0.0, period - (time.monotonic() - cycle_start)))
     except Exception as exc:
         estop.trigger(str(exc))
@@ -469,6 +606,7 @@ def main() -> None:
                 held_right = measured[RIGHT_ARM_MOTORS].copy()
                 for _ in range(20):
                     robot.send_arms(held_left, held_right)
+                    robot.send_inspire_hands(right_hand_command, left_hand_command)
                     time.sleep(0.01)
         finally:
             robot.stop_low_level_publisher()
