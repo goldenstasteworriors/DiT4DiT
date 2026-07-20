@@ -52,7 +52,9 @@ python g1_joint_client.py --server <A800_1可达IP> --network-interface enp7s0 -
 真机启动顺序：
 
 1. 程序打印初始化目标关节角，按 Enter 才释放运动服务并启用 `rt/lowcmd`。
-2. 右臂从 LowState 实测角出发，以 minimum-jerk 曲线移动至 episode 0 的精确初态
+2. 双臂从 LowState 实测角出发，以同一条 minimum-jerk 曲线移动至 episode 0 的精确初态。
+   左臂为 `[0.120298, 0.162961, 0.468787, -0.279940, -0.156190, 0.076663, -0.247654]`；
+   右臂为
    `[0.010702, -0.233477, -0.072876, -0.584854, 0.365135, 0.419927, -0.250482]`；
    Inspire 手同步设为 `[0.998, 1, 0.998, 0.998, 0.999, 0.984]`（1 为张开）。
 3. 程序显示 `READY` 后会持续保持初始姿态，但不会查询模型；检查现场后按 `L` 才开始推理。
@@ -63,12 +65,14 @@ python g1_joint_client.py --server <A800_1可达IP> --network-interface enp7s0 -
 ```bash
 python g1_joint_client.py ... --arm \
   --initial-duration 8 --initial-speed 0.1 \
+  --initial-left-arm 0.120298 0.162961 0.468787 -0.279940 -0.156190 0.076663 -0.247654 \
   --initial-right-arm 0.010702 -0.233477 -0.072876 -0.584854 0.365135 0.419927 -0.250482 \
   --initial-right-hand 0.998 1 0.998 0.998 0.999 0.984
 ```
 
-下发参考 SONICMJ 的 `rt/lowcmd` 低层控制。右臂跟随模型，左臂保持进入低层控制时的
-实测姿态；双腿和腰默认使用纯速度阻尼（无位置目标、零前馈力矩），因此必须可靠吊挂。
+下发参考 SONICMJ 的 `rt/lowcmd` 低层控制。初始化时双臂同步移动到 episode 0；推理时
+右臂跟随模型，左臂保持 episode 0 姿态。双腿和腰默认使用纯速度阻尼（无位置目标、
+零前馈力矩），因此必须可靠吊挂。
 只有在确认机器人完全由吊架承重后，才可显式使用 `--lower-body-mode zero-torque`。
 安全逻辑包括：键盘
 急停锁存、Ctrl-C、低状态 200 ms 看门狗、推理 15 s 超时（包含首次 CUDA warm-up）、

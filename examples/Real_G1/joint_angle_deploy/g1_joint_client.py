@@ -32,9 +32,14 @@ VEL_STOP_F = 16000.0
 ARM_KP = np.array([50.0, 50.0, 20.0, 20.0, 10.0, 10.0, 10.0])
 ARM_KD = np.array([5.0, 5.0, 2.0, 2.0, 2.0, 2.0, 2.0])
 LOWER_BODY_KD = np.array([2.0, 2.0, 2.0, 4.0, 2.0, 2.0, 2.0, 2.0, 2.0, 4.0, 2.0, 2.0, 5.0, 5.0, 5.0])
+LEFT_ARM_LOWER = np.array([-3.0892, -1.5882, -2.618, -1.0472, -1.9722, -1.6144, -1.6144])
+LEFT_ARM_UPPER = np.array([2.6704, 2.2515, 2.618, 2.0944, 1.9722, 1.6144, 1.6144])
 RIGHT_ARM_LOWER = np.array([-3.0892, -2.2515, -2.618, -1.0472, -1.9722, -1.6144, -1.6144])
 RIGHT_ARM_UPPER = np.array([2.6704, 1.5882, 2.618, 2.0944, 1.9722, 1.6144, 1.6144])
-# Exact state stored in training episode 0 (right arm 7 + Inspire right hand 6).
+# Exact frame-0 state from the original (uncropped) training episode 0.
+DEFAULT_INITIAL_LEFT_ARM = np.array(
+    [0.12029766, 0.16296150, 0.46878693, -0.27993950, -0.15619041, 0.07666309, -0.24765402]
+)
 DEFAULT_INITIAL_RIGHT_ARM = np.array(
     [0.01070191, -0.23347668, -0.07287607, -0.58485419, 0.36513537, 0.41992724, -0.25048229]
 )
@@ -109,7 +114,7 @@ class G1DDS:
         self._lock = threading.Lock()
         self._command_lock = threading.Lock()
         self._low_level_enabled = False
-        self._left_arm_hold = None
+        self._left_arm_target = None
         self._right_arm_target = None
         self._publisher_stop = threading.Event()
         self._publisher_thread = None
@@ -168,7 +173,7 @@ class G1DDS:
             status, result = self._motion_switcher.CheckMode()
         if result.get("name"):
             raise RuntimeError(f"failed to release active motion mode: {result}")
-        self._left_arm_hold = measured[LEFT_ARM_MOTORS].copy()
+        self._left_arm_target = measured[LEFT_ARM_MOTORS].copy()
         self._right_arm_target = measured[RIGHT_ARM_MOTORS].copy()
         self._low_level_enabled = True
         self._publisher_stop.clear()
@@ -177,13 +182,24 @@ class G1DDS:
         print(f"[LOW LEVEL] rt/lowcmd enabled; lower body={self._lower_body_mode}")
 
     def send_right_arm(self, target: np.ndarray, measured: np.ndarray):
-        if not self._low_level_enabled or self._left_arm_hold is None:
+        if not self._low_level_enabled or self._left_arm_target is None:
             raise RuntimeError("low-level control is not enabled")
         target = np.asarray(target, dtype=np.float64)
         if target.shape != (7,) or not np.isfinite(target).all():
             raise ValueError("right-arm target must contain 7 finite values")
         with self._command_lock:
             self._right_arm_target = target.copy()
+
+    def send_arms(self, left_target: np.ndarray, right_target: np.ndarray):
+        if not self._low_level_enabled:
+            raise RuntimeError("low-level control is not enabled")
+        left = np.asarray(left_target, dtype=np.float64)
+        right = np.asarray(right_target, dtype=np.float64)
+        if left.shape != (7,) or right.shape != (7,) or not np.isfinite(left).all() or not np.isfinite(right).all():
+            raise ValueError("left/right arm targets must each contain 7 finite values")
+        with self._command_lock:
+            self._left_arm_target = left.copy()
+            self._right_arm_target = right.copy()
 
     def _publish_loop(self):
         """Keep rt/lowcmd alive at 100 Hz while inference runs asynchronously on the main thread."""
@@ -202,7 +218,8 @@ class G1DDS:
         with self._command_lock:
             if self._right_arm_target is None:
                 return
-            target = self._right_arm_target.copy()
+            right_target = self._right_arm_target.copy()
+            left_target = self._left_arm_target.copy()
         self._cmd.level_flag = 0xFF
         self._cmd.mode_pr = 0
         self._cmd.mode_machine = self._mode_machine
@@ -221,12 +238,12 @@ class G1DDS:
                     motor.kd = 0.0
             elif i in LEFT_ARM_MOTORS:
                 arm_index = i - LEFT_ARM_MOTORS[0]
-                motor.q = float(self._left_arm_hold[arm_index])
+                motor.q = float(left_target[arm_index])
                 motor.kp = float(ARM_KP[arm_index])
                 motor.kd = float(ARM_KD[arm_index])
             else:
                 arm_index = i - RIGHT_ARM_MOTORS[0]
-                motor.q = float(target[arm_index])
+                motor.q = float(right_target[arm_index])
                 motor.kp = float(ARM_KP[arm_index])
                 motor.kd = float(ARM_KD[arm_index])
         self._cmd.crc = self._crc.Crc(self._cmd)
@@ -293,6 +310,14 @@ def main():
     parser.add_argument("--initial-duration", type=float, default=5.0, help="minimum initialization duration in seconds")
     parser.add_argument("--initial-tolerance", type=float, default=0.04, help="ready tolerance in rad")
     parser.add_argument(
+        "--initial-left-arm",
+        type=float,
+        nargs=7,
+        default=DEFAULT_INITIAL_LEFT_ARM.tolist(),
+        metavar=("SP", "SR", "SY", "E", "WR", "WP", "WY"),
+        help="left-arm deployment pose; default is the exact original episode-0 initial state",
+    )
+    parser.add_argument(
         "--initial-right-arm",
         type=float,
         nargs=7,
@@ -329,18 +354,23 @@ def main():
     signal.signal(signal.SIGINT, lambda *_: estop.trigger("Ctrl-C"))
     old_tty = termios.tcgetattr(sys.stdin)
     tty.setcbreak(sys.stdin.fileno())
+    initial_left_pose = np.asarray(args.initial_left_arm, dtype=np.float64)
     initial_pose = np.asarray(args.initial_right_arm, dtype=np.float64)
     right_hand_state = np.asarray(args.initial_right_hand, dtype=np.float64)
+    if np.any(initial_left_pose < LEFT_ARM_LOWER) or np.any(initial_left_pose > LEFT_ARM_UPPER):
+        raise SystemExit("initial-left-arm exceeds URDF joint limits")
     if np.any(initial_pose < RIGHT_ARM_LOWER) or np.any(initial_pose > RIGHT_ARM_UPPER):
         raise SystemExit("initial-right-arm exceeds URDF joint limits")
     if np.any(right_hand_state < 0.0) or np.any(right_hand_state > 1.0):
         raise SystemExit("initial-right-hand must be normalized to [0, 1]")
     print(f"初始化目标关节角: {np.round(initial_pose, 4)}")
+    print(f"episode 0 左臂初态: {np.round(initial_left_pose, 4)}")
     print(f"episode 0 Inspire 手初态: {np.round(right_hand_state, 4)}")
     print("SPACE/Q=急停；ENTER=开始抬臂初始化；到达 READY 后按 L 才启动模型。")
     enabled = False
     phase = "DRY_RUN" if not args.arm else "DISARMED"
     init_start_q = None
+    init_start_left_q = None
     init_start_time = 0.0
     init_duration = args.initial_duration
     cache = np.empty((0, 13))
@@ -365,17 +395,23 @@ def main():
             measured = robot.state(0.2)
             arm_q = measured[RIGHT_ARM_MOTORS]
             if phase == "START_INITIALIZATION":
+                init_start_left_q = measured[LEFT_ARM_MOTORS].copy()
                 init_start_q = arm_q.copy()
                 init_start_time = time.monotonic()
                 # Minimum-jerk peak velocity is 1.875 * distance / duration.
-                speed_duration = 1.875 * float(np.max(np.abs(initial_pose - init_start_q))) / args.initial_speed
+                max_distance = max(
+                    float(np.max(np.abs(initial_pose - init_start_q))),
+                    float(np.max(np.abs(initial_left_pose - init_start_left_q))),
+                )
+                speed_duration = 1.875 * max_distance / args.initial_speed
                 init_duration = max(args.initial_duration, speed_duration)
                 phase = "INITIALIZING"
                 print(f"[INITIALIZING] 预计 {init_duration:.1f}s；插值期间 SPACE/Q 同样有效")
             if phase == "INITIALIZING":
                 progress = (time.monotonic() - init_start_time) / init_duration
                 target = _minimum_jerk(init_start_q, initial_pose, progress)
-                robot.send_right_arm(target, measured)
+                left_target = _minimum_jerk(init_start_left_q, initial_left_pose, progress)
+                robot.send_arms(left_target, target)
                 robot.send_inspire_hands(right_hand_state, left_hand_hold)
                 if progress >= 1.0 and np.max(np.abs(arm_q - initial_pose)) <= args.initial_tolerance:
                     phase = "READY"
@@ -384,7 +420,7 @@ def main():
                 continue
             if phase in ("DISARMED", "READY"):
                 if phase == "READY":
-                    robot.send_right_arm(initial_pose, measured)
+                    robot.send_arms(initial_left_pose, initial_pose)
                     robot.send_inspire_hands(right_hand_state, left_hand_hold)
                 time.sleep(max(0.0, period - (time.monotonic() - start)))
                 continue
@@ -419,8 +455,10 @@ def main():
         try:
             if enabled:
                 measured = robot.state(0.2)
+                held_left = measured[LEFT_ARM_MOTORS].copy()
+                held_right = measured[RIGHT_ARM_MOTORS].copy()
                 for _ in range(20):
-                    robot.send_right_arm(measured[RIGHT_ARM_MOTORS], measured)
+                    robot.send_arms(held_left, held_right)
                     robot.send_inspire_hands(right_hand_state, left_hand_hold)
                     time.sleep(0.01)
         finally:
