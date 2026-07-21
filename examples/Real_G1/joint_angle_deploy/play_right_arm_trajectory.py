@@ -366,7 +366,7 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--estop-damping-duration", type=float, default=10.0)
     parser.add_argument("--initial-duration", type=float, default=8.0)
     parser.add_argument("--initial-speed", type=float, default=0.1, help="initialization limit in rad/s")
-    parser.add_argument("--initial-tolerance", type=float, default=0.01, help="READY tolerance in rad")
+    parser.add_argument("--initial-tolerance", type=float, default=0.05, help="READY tolerance in rad")
     parser.add_argument("--initial-hand-tolerance", type=float, default=0.02)
     parser.add_argument(
         "--enable-initial-outer-loop-compensation",

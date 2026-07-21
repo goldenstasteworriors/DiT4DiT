@@ -859,7 +859,7 @@ def main():
     )
     parser.add_argument("--initial-speed", type=float, default=0.15, help="initialization speed limit in rad/s")
     parser.add_argument("--initial-duration", type=float, default=5.0, help="minimum initialization duration in seconds")
-    parser.add_argument("--initial-tolerance", type=float, default=0.01, help="per-joint READY tolerance in rad")
+    parser.add_argument("--initial-tolerance", type=float, default=0.05, help="per-joint READY tolerance in rad")
     parser.add_argument("--initial-hand-tolerance", type=float, default=0.02, help="per-finger READY tolerance")
     parser.add_argument(
         "--enable-initial-outer-loop-compensation",

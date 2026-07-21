@@ -83,7 +83,7 @@ python g1_joint_client.py --server <A800_1可达IP> --network-interface enp7s0 -
    LowCmd 插值终点直接使用 episode 0 的 `observation.state`。插值结束后根据 LowState
    实测误差缓慢累积一个限速的位置修正量。默认修正速度不超过 `0.03 rad/s`，每个关节
    最多修正 `0.15 rad`；误差小于 `0.003 rad` 时停止积分，避免测量噪声导致漂移。
-3. 程序会同时检查双臂与双手实测误差；手臂全部小于 `0.01 rad`、手指全部小于 `0.02`，
+3. 程序会同时检查双臂与双手实测误差；手臂全部小于 `0.05 rad`、手指全部小于 `0.02`，
    并连续保持 1 秒才显示 `READY`。READY 后持续保持初始姿态，但不会查询模型；检查现场
    后按 `L` 才开始推理。
 4. 初始化和推理期间按 Space/Q 都会锁存急停。
@@ -163,7 +163,7 @@ minimum-jerk 插值结束后，初始化和 READY 阶段默认不使用双臂外
 Kp/Kd 与全程重力补偿。需要恢复外环时显式添加
 `--enable-initial-outer-loop-compensation`；其默认积分率为 `1.0/s`、修正速度上限
 `0.03 rad/s`、修正偏置上限 `0.15 rad`、死区 `0.003 rad`，
-所有关节误差需连续1秒保持在 `0.01 rad` 内才进入 `READY`。内环使用
+所有关节误差需连续1秒保持在 `0.05 rad` 内才进入 `READY`。内环使用
 `g1_joint_client.py` 中相同的手臂 Kp/Kd，并默认在初始化、READY、轨迹播放/在线推理和
 末姿态保持的每个100 Hz下发周期，使用 Pinocchio RNEA 计算双臂目标姿态的重力前馈力矩。
 该实现与 xrteleoperate 相同：腿和腰锁定在 URDF 中性位构造14-DoF双臂 reduced model，
