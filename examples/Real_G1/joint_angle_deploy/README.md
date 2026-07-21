@@ -122,6 +122,36 @@ python g1_joint_client.py ... --arm \
 目标、命令和实测状态。相邻两行的 `measured_arm_*` 可以用来检查上一行命令执行后的跟踪
 情况；跨 chunk 时还包含同步推理期间持续保持上一目标后的最终实测结果。
 
+部署命令添加 `--view-simulation` 会同时打开在线 MuJoCo 影子机器人。它不读取部署记录，
+也不与机器人通信：初始化阶段接收与真机相同频率的 minimum-jerk 双臂目标；模型接管后，
+客户端仍按 `--execution-horizon` 对局部腕部相对位姿逐步累加和求 IK，并把每一步未经实机
+跟踪误差影响的 IK 目标同步送入影子机器人。因此窗口表示“如果每一步都准确执行，机械臂
+现在应该在哪里”，可直接与旁边真机比较：
+
+```bash
+QT_LOGGING_RULES="\*.warning=false" conda run --no-capture-output \
+  -n decoupled_vla_collection \
+  python examples/Real_G1/joint_angle_deploy/g1_joint_client.py \
+    --server 127.0.0.1 \
+    --port 15556 \
+    --network-interface enxdc045a1d933b \
+    --camera-host 192.168.123.164 \
+    --camera-port 5555 \
+    --camera-name ego_view \
+    --view-camera \
+    --view-simulation \
+    --action-space wrist-delta \
+    --execution-horizon 4 \
+    --frequency 10 \
+    --max-speed 0.15 \
+    --max-hand-speed 0.3 \
+    --timeout-ms 30000 \
+    --arm
+```
+
+影子仿真在独立进程中运行，不会因为 MuJoCo/GLFW 窗口阻塞 100 Hz LowCmd 发布线程；关闭
+仿真窗口会被视为部署异常并触发现有急停流程，避免操作者误以为仍在同步比较。
+
 可以循环播放最新一次部署的在线 IK 结果。`--frequency` 和部署命令保持一致；记录中的
 `joint_action_output` 已经是按局部腕部增量逐步累加并逐步求 IK 的结果，因此默认会严格播放
 该次部署实际选择的 `execution-horizon` 步数：

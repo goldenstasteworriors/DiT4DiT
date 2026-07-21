@@ -866,6 +866,17 @@ def main():
         action="store_true",
         help="show the selected robot/local camera after initialization reaches READY",
     )
+    parser.add_argument(
+        "--view-simulation",
+        action="store_true",
+        help="open a synchronized MuJoCo shadow that assumes every nominal arm target is reached exactly",
+    )
+    parser.add_argument(
+        "--simulation-model",
+        type=Path,
+        default=PROJECT_ROOT
+        / "decoupled_wbc/gr00t_wbc/control/robot_model/model_data/g1/g1_29dof_with_hand.xml",
+    )
     parser.add_argument("--instruction", default="pick up the pipette")
     parser.add_argument(
         "--action-space",
@@ -1068,6 +1079,11 @@ def main():
         args.camera_stale_warning,
         args.camera_stale_log_interval,
     )
+    shadow = None
+    if args.view_simulation:
+        from examples.Real_G1.joint_angle_deploy.live_shadow_mujoco import LiveShadowMujoco
+
+        shadow = LiveShadowMujoco(args.simulation_model)
     wrist_ik = None
     if args.action_space == "wrist-delta":
         from examples.PipetteRightOnly.convert_wrist_delta_to_joint_chunks import RightArmIK
@@ -1166,6 +1182,8 @@ def main():
             measured = read_robot_state()
             left_arm_q = measured[LEFT_ARM_MOTORS]
             arm_q = measured[RIGHT_ARM_MOTORS]
+            if shadow is not None and phase in ("DISARMED", "DRY_RUN"):
+                shadow.update(measured, left_arm_q, arm_q)
             if phase not in ("DISARMED", "DRY_RUN"):
                 right_hand_measured, left_hand_measured = robot.hand_state(0.5)
             if phase == "START_INITIALIZATION":
@@ -1214,6 +1232,8 @@ def main():
                     target = np.clip(initial_pose + right_init_correction, RIGHT_ARM_LOWER, RIGHT_ARM_UPPER)
                 robot.send_arms(left_target, target)
                 robot.send_inspire_hands(right_hand_command, left_hand_command)
+                if shadow is not None:
+                    shadow.update(measured, left_target, target)
                 if progress >= 1.0:
                     right_hand_error = initial_right_hand_state - right_hand_measured
                     left_hand_error = initial_left_hand_state - left_hand_measured
@@ -1292,6 +1312,8 @@ def main():
                     right_hold = np.clip(initial_pose + right_init_correction, RIGHT_ARM_LOWER, RIGHT_ARM_UPPER)
                     robot.send_arms(left_hold, right_hold)
                     robot.send_inspire_hands(right_hand_command, left_hand_command)
+                    if shadow is not None:
+                        shadow.update(measured, initial_left_pose, initial_pose)
                 time.sleep(max(0.0, period - (time.monotonic() - start)))
                 continue
             frame = camera.frame()
@@ -1378,6 +1400,10 @@ def main():
                 right_hand_measured,
             )
             cache_action_index += 1
+            if shadow is not None:
+                # Use the un-clipped online IK target: this is the ideal pose when
+                # every relative wrist step is reached with zero tracking error.
+                shadow.update(measured, initial_left_pose, desired_arm)
             if enabled:
                 robot.send_right_arm(target, measured)
                 robot.send_inspire_hands(right_hand_command, left_hand_command)
@@ -1418,6 +1444,8 @@ def main():
             robot.stop_low_level_publisher()
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_tty)
             camera.close()
+            if shadow is not None:
+                shadow.close()
 
 
 if __name__ == "__main__":
