@@ -71,8 +71,11 @@ def quat_wxyz_to_matrix(quaternion: np.ndarray) -> np.ndarray:
 
 
 def rotation_6d_to_matrix(rotation_6d: np.ndarray) -> np.ndarray:
-    first = np.asarray(rotation_6d[:3], dtype=np.float64)
-    second = np.asarray(rotation_6d[3:6], dtype=np.float64)
+    # ZMQ/msgpack may decode model outputs into a read-only NumPy buffer.  The
+    # normalization below is intentionally in-place, so detach both vectors
+    # from that transport buffer first.
+    first = np.array(rotation_6d[:3], dtype=np.float64, copy=True)
+    second = np.array(rotation_6d[3:6], dtype=np.float64, copy=True)
     first /= max(float(np.linalg.norm(first)), 1e-12)
     second -= float(np.dot(first, second)) * first
     if np.linalg.norm(second) < 1e-8:
