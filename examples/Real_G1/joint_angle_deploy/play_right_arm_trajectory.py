@@ -9,6 +9,7 @@ right-Inspire-hand command sequences before any DDS connection is opened.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import re
 import select
@@ -30,6 +31,73 @@ LEFT_ARM_LOWER = np.array([-3.0892, -1.5882, -2.618, -1.0472, -1.9722, -1.6144, 
 LEFT_ARM_UPPER = np.array([2.6704, 2.2515, 2.618, 2.0944, 1.9722, 1.6144, 1.6144])
 RIGHT_ARM_LOWER = np.array([-3.0892, -2.2515, -2.618, -1.0472, -1.9722, -1.6144, -1.6144])
 RIGHT_ARM_UPPER = np.array([2.6704, 1.5882, 2.618, 2.0944, 1.9722, 1.6144, 1.6144])
+ARM_JOINT_NAMES = (
+    "shoulder_pitch", "shoulder_roll", "shoulder_yaw", "elbow",
+    "wrist_roll", "wrist_pitch", "wrist_yaw",
+)
+
+
+class TrajectoryTrackingRecorder:
+    """Stream desired, sent, and measured right-arm joints for each control cycle."""
+
+    def __init__(self, path: Path, trajectory: Path, frequency: float):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.path = path
+        self._handle = path.open("w", encoding="utf-8", newline="")
+        self._writer = csv.writer(self._handle)
+        self._started = time.monotonic()
+        self._rows = 0
+        fields = [
+            "wall_time_unix", "elapsed_s", "phase", "control_cycle",
+            "command_index", "trajectory_index", "trajectory_file", "frequency_hz",
+        ]
+        for prefix in ("trajectory_target", "sent_target", "measured", "trajectory_error", "sent_error", "init_correction"):
+            fields.extend(f"{prefix}_{name}" for name in ARM_JOINT_NAMES)
+        self._writer.writerow(fields)
+        self._trajectory = str(trajectory)
+        self._frequency = frequency
+
+    def record(
+        self,
+        phase: str,
+        control_cycle: int,
+        command_index: int,
+        trajectory_index: int,
+        trajectory_target: np.ndarray,
+        sent_target: np.ndarray,
+        measured: np.ndarray,
+        init_correction: np.ndarray,
+    ) -> None:
+        trajectory_target = np.asarray(trajectory_target, dtype=np.float64)
+        sent_target = np.asarray(sent_target, dtype=np.float64)
+        measured = np.asarray(measured, dtype=np.float64)
+        init_correction = np.asarray(init_correction, dtype=np.float64)
+        arrays = (trajectory_target, sent_target, measured, init_correction)
+        if any(array.shape != (7,) or not np.isfinite(array).all() for array in arrays):
+            raise ValueError("trajectory recorder received an invalid 7-D joint vector")
+        row = [
+            time.time(), time.monotonic() - self._started, phase, control_cycle,
+            command_index, trajectory_index, self._trajectory, self._frequency,
+        ]
+        for values in (
+            trajectory_target,
+            sent_target,
+            measured,
+            trajectory_target - measured,
+            sent_target - measured,
+            init_correction,
+        ):
+            row.extend(values.tolist())
+        self._writer.writerow(row)
+        self._rows += 1
+        if self._rows % 100 == 0:
+            self._handle.flush()
+
+    def close(self) -> None:
+        if not self._handle.closed:
+            self._handle.flush()
+            self._handle.close()
+            print(f"[RECORD] 已保存 {self._rows} 个控制周期：{self.path}")
 
 
 class EStop:
@@ -323,6 +391,13 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--lower-body-mode", choices=("damping", "zero-torque"), default="damping"
     )
+    parser.add_argument(
+        "--record-dir",
+        type=Path,
+        default=DEFAULT_RECORDS_DIR / "trajectory_tracking",
+        help="directory for per-control-cycle target/measured CSV logs",
+    )
+    parser.add_argument("--no-record", action="store_true", help="disable target/measured CSV recording")
     parser.add_argument("--arm", action="store_true", help="actually release motion mode and publish rt/lowcmd")
     return parser
 
@@ -441,6 +516,14 @@ def main() -> None:
     )
 
     robot = G1DDS(args.network_interface, args.lower_body_mode)
+    recorder = None
+    if not args.no_record:
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        record_path = args.record_dir.expanduser().resolve() / (
+            f"{trajectory_path.stem}_{args.aggregation}_{timestamp}.csv"
+        )
+        recorder = TrajectoryTrackingRecorder(record_path, trajectory_path, args.frequency)
+        print(f"[RECORD] 将记录轨迹目标、实际下发目标和实测关节角：{record_path}")
 
     def read_robot_state() -> np.ndarray:
         return robot.state(
@@ -569,6 +652,11 @@ def main() -> None:
                         )
                         last_init_status_time = now
                 robot.send_arms(left_target, target)
+                if recorder is not None:
+                    recorder.record(
+                        "INITIALIZING", cycle_index, -1, 0,
+                        initial_pose, target, right_q, right_init_correction,
+                    )
                 if cycle_index % hand_stride == 0:
                     robot.send_inspire_hands(right_hand_command, left_hand_command)
 
@@ -592,6 +680,11 @@ def main() -> None:
                     initial_pose + right_init_correction, RIGHT_ARM_LOWER, RIGHT_ARM_UPPER
                 )
                 robot.send_arms(left_hold, right_hold)
+                if recorder is not None:
+                    recorder.record(
+                        "READY", cycle_index, -1, 0,
+                        initial_pose, right_hold, right_q, right_init_correction,
+                    )
                 if cycle_index % hand_stride == 0:
                     robot.send_inspire_hands(right_hand_command, left_hand_command)
                 if key == "l":
@@ -602,12 +695,21 @@ def main() -> None:
                     print(f"[PLAYING] 开始连续播放 {playback_duration:.2f}s 的完整右臂和右手轨迹")
 
             elif phase == "PLAYING":
-                command = commands[command_index]
-                right_hand_command = hand_commands[command_index]
+                played_command_index = command_index
+                command = commands[played_command_index]
+                right_hand_command = hand_commands[played_command_index]
+                elapsed = played_command_index / args.frequency
+                trajectory_index = min(int(elapsed / target_dt), len(targets) - 1)
+                trajectory_target = targets[trajectory_index]
                 runtime_speed = float(np.max(np.abs(command - previous_command)) * args.frequency)
                 if runtime_speed > args.max_speed + 1e-9:
                     raise RuntimeError(f"runtime command speed guard triggered: {runtime_speed:.6f} rad/s")
                 robot.send_arms(left_hold, command)
+                if recorder is not None:
+                    recorder.record(
+                        "PLAYING", cycle_index, played_command_index, trajectory_index,
+                        trajectory_target, command, right_q, right_init_correction,
+                    )
                 if cycle_index % hand_stride == 0:
                     robot.send_inspire_hands(right_hand_command, left_hand_command)
                 previous_command = command.copy()
@@ -618,6 +720,11 @@ def main() -> None:
 
             elif phase == "HOLDING":
                 robot.send_arms(left_hold, commands[-1])
+                if recorder is not None:
+                    recorder.record(
+                        "HOLDING", cycle_index, len(commands) - 1, len(targets) - 1,
+                        targets[-1], commands[-1], right_q, right_init_correction,
+                    )
                 if cycle_index % hand_stride == 0:
                     robot.send_inspire_hands(hand_commands[-1], left_hand_command)
 
@@ -655,6 +762,8 @@ def main() -> None:
         finally:
             robot.stop_low_level_publisher()
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_tty)
+            if recorder is not None:
+                recorder.close()
 
 
 if __name__ == "__main__":
