@@ -939,7 +939,7 @@ def main():
     parser.add_argument(
         "--initial-correction-rate",
         type=float,
-        default=2.0,
+        default=1.0,
         help="post-interpolation outer-loop correction rate in 1/s",
     )
     parser.add_argument(
@@ -963,7 +963,7 @@ def main():
     parser.add_argument(
         "--initial-stable-duration",
         type=float,
-        default=1.0,
+        default=2.0,
         help="all joints must remain within tolerance for this many seconds before READY",
     )
     parser.add_argument(
