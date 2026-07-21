@@ -383,6 +383,7 @@ class G1DDS:
         self._lock = threading.Lock()
         self._command_lock = threading.Lock()
         self._low_level_enabled = False
+        self._emergency_damping = False
         self._left_arm_target = None
         self._right_arm_target = None
         self._publisher_stop = threading.Event()
@@ -476,6 +477,8 @@ class G1DDS:
         if target.shape != (7,) or not np.isfinite(target).all():
             raise ValueError("right-arm target must contain 7 finite values")
         with self._command_lock:
+            if self._emergency_damping:
+                raise RuntimeError("arm command rejected after emergency damping was latched")
             self._right_arm_target = target.copy()
 
     def send_arms(self, left_target: np.ndarray, right_target: np.ndarray):
@@ -486,8 +489,17 @@ class G1DDS:
         if left.shape != (7,) or right.shape != (7,) or not np.isfinite(left).all() or not np.isfinite(right).all():
             raise ValueError("left/right arm targets must each contain 7 finite values")
         with self._command_lock:
+            if self._emergency_damping:
+                raise RuntimeError("arm command rejected after emergency damping was latched")
             self._left_arm_target = left.copy()
             self._right_arm_target = right.copy()
+
+    def enter_emergency_damping(self):
+        """Latch zero-position-gain arm damping without requiring fresh LowState."""
+        if not self._low_level_enabled:
+            return
+        with self._command_lock:
+            self._emergency_damping = True
 
     def _publish_loop(self):
         """Keep rt/lowcmd alive at 100 Hz while inference runs asynchronously on the main thread."""
@@ -508,6 +520,7 @@ class G1DDS:
                 return
             right_target = self._right_arm_target.copy()
             left_target = self._left_arm_target.copy()
+            emergency_damping = self._emergency_damping
         self._cmd.level_flag = 0xFF
         self._cmd.mode_pr = 0
         self._cmd.mode_machine = self._mode_machine
@@ -526,13 +539,13 @@ class G1DDS:
                     motor.kd = 0.0
             elif i in LEFT_ARM_MOTORS:
                 arm_index = i - LEFT_ARM_MOTORS[0]
-                motor.q = float(left_target[arm_index])
-                motor.kp = float(ARM_KP[arm_index])
+                motor.q = POS_STOP_F if emergency_damping else float(left_target[arm_index])
+                motor.kp = 0.0 if emergency_damping else float(ARM_KP[arm_index])
                 motor.kd = float(ARM_KD[arm_index])
             else:
                 arm_index = i - RIGHT_ARM_MOTORS[0]
-                motor.q = float(right_target[arm_index])
-                motor.kp = float(ARM_KP[arm_index])
+                motor.q = POS_STOP_F if emergency_damping else float(right_target[arm_index])
+                motor.kp = 0.0 if emergency_damping else float(ARM_KP[arm_index])
                 motor.kd = float(ARM_KD[arm_index])
         self._cmd.crc = self._crc.Crc(self._cmd)
         self._publisher.Write(self._cmd)
@@ -561,7 +574,11 @@ class EStop:
     def trigger(self, reason: str):
         if not self.latched:
             self.latched, self.reason = True, reason
-            print(f"\n[E-STOP] 已锁存：{reason}；保持当前实测关节角", flush=True)
+            print(
+                f"\n[E-STOP] 已锁存：{reason}；状态有效时保持实测角，"
+                "状态失联时双臂切换零位置增益阻尼",
+                flush=True,
+            )
 
 
 def _read_key() -> str | None:
@@ -625,6 +642,12 @@ def main():
     parser.add_argument("--execution-horizon", type=int, default=4)
     parser.add_argument("--max-speed", type=float, default=0.25, help="rad/s")
     parser.add_argument("--max-hand-speed", type=float, default=0.5, help="normalized Inspire units/s")
+    parser.add_argument(
+        "--estop-damping-duration",
+        type=float,
+        default=10.0,
+        help="keep publishing arm damping this long after stale LowState, allowing it to reach a reconnecting robot",
+    )
     parser.add_argument("--initial-speed", type=float, default=0.15, help="initialization speed limit in rad/s")
     parser.add_argument("--initial-duration", type=float, default=5.0, help="minimum initialization duration in seconds")
     parser.add_argument("--initial-tolerance", type=float, default=0.01, help="per-joint READY tolerance in rad")
@@ -710,6 +733,8 @@ def main():
         raise SystemExit("必须在交互终端运行，确保键盘急停可用")
     if args.camera_stale_warning <= 0.0 or args.camera_stale_log_interval <= 0.0:
         raise SystemExit("camera stale warning/log intervals must be positive")
+    if args.estop_damping_duration <= 0.0:
+        raise SystemExit("estop-damping-duration must be positive")
     if min(
         args.ik_max_iterations,
         args.ik_damping,
@@ -1021,13 +1046,30 @@ def main():
     finally:
         try:
             if enabled:
-                measured = robot.state(0.2)
-                held_left = measured[LEFT_ARM_MOTORS].copy()
-                held_right = measured[RIGHT_ARM_MOTORS].copy()
-                for _ in range(20):
-                    robot.send_arms(held_left, held_right)
-                    robot.send_inspire_hands(right_hand_command, left_hand_command)
-                    time.sleep(0.01)
+                state_is_stale = "lowstate missing or stale" in estop.reason.lower()
+                measured = None
+                if not state_is_stale:
+                    try:
+                        measured = robot.state(0.2)
+                    except RuntimeError:
+                        state_is_stale = True
+                if state_is_stale:
+                    robot.enter_emergency_damping()
+                    print(
+                        f"[E-STOP] LowState 不可用：持续发送双臂阻尼命令 "
+                        f"{args.estop_damping_duration:.1f}s 后退出",
+                        flush=True,
+                    )
+                    deadline = time.monotonic() + args.estop_damping_duration
+                    while time.monotonic() < deadline:
+                        time.sleep(0.05)
+                else:
+                    held_left = measured[LEFT_ARM_MOTORS].copy()
+                    held_right = measured[RIGHT_ARM_MOTORS].copy()
+                    for _ in range(20):
+                        robot.send_arms(held_left, held_right)
+                        robot.send_inspire_hands(right_hand_command, left_hand_command)
+                        time.sleep(0.01)
         finally:
             robot.stop_low_level_publisher()
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_tty)
