@@ -35,11 +35,17 @@ RIGHT_ARM_UPPER = np.array([2.6704, 1.5882, 2.618, 2.0944, 1.9722, 1.6144, 1.614
 class EStop:
     def __init__(self) -> None:
         self.latched = False
+        self.reason = ""
 
     def trigger(self, reason: str) -> None:
         if not self.latched:
             self.latched = True
-            print(f"\n[E-STOP] 已锁存：{reason}；保持当前实测关节角", flush=True)
+            self.reason = reason
+            print(
+                f"\n[E-STOP] 已锁存：{reason}；状态有效时保持实测角，"
+                "状态失联时双臂切换零位置增益阻尼",
+                flush=True,
+            )
 
 
 def read_key() -> str | None:
@@ -286,6 +292,10 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--max-speed", type=float, default=0.25, help="hard command limit in rad/s per joint")
     parser.add_argument("--max-hand-speed", type=float, default=0.5, help="right-hand limit in normalized units/s")
     parser.add_argument("--hand-frequency", type=float, default=10.0, help="rt/inspire/cmd publish frequency in Hz")
+    parser.add_argument("--lowstate-warning-age", type=float, default=0.2)
+    parser.add_argument("--lowstate-timeout", type=float, default=0.5)
+    parser.add_argument("--lowstate-warning-interval", type=float, default=2.0)
+    parser.add_argument("--estop-damping-duration", type=float, default=10.0)
     parser.add_argument("--initial-duration", type=float, default=8.0)
     parser.add_argument("--initial-speed", type=float, default=0.1, help="initialization limit in rad/s")
     parser.add_argument("--initial-tolerance", type=float, default=0.01, help="READY tolerance in rad")
@@ -341,6 +351,15 @@ def main() -> None:
         raise SystemExit("initial correction and stable-duration arguments must be non-negative")
     if args.initial_correction_deadband >= args.initial_tolerance:
         raise SystemExit("--initial-correction-deadband must be smaller than --initial-tolerance")
+    if min(
+        args.lowstate_warning_age,
+        args.lowstate_timeout,
+        args.lowstate_warning_interval,
+        args.estop_damping_duration,
+    ) <= 0.0:
+        raise SystemExit("LowState watchdog and e-stop damping parameters must be positive")
+    if args.lowstate_warning_age >= args.lowstate_timeout:
+        raise SystemExit("--lowstate-warning-age must be smaller than --lowstate-timeout")
     hand_stride = round(args.frequency / args.hand_frequency)
     if args.hand_frequency > args.frequency or not np.isclose(
         hand_stride * args.hand_frequency, args.frequency
@@ -422,6 +441,14 @@ def main() -> None:
     )
 
     robot = G1DDS(args.network_interface, args.lower_body_mode)
+
+    def read_robot_state() -> np.ndarray:
+        return robot.state(
+            args.lowstate_timeout,
+            warning_age=args.lowstate_warning_age,
+            warning_interval=args.lowstate_warning_interval,
+        )
+
     estop = EStop()
     signal.signal(signal.SIGINT, lambda *_: estop.trigger("Ctrl-C"))
     old_tty = termios.tcgetattr(sys.stdin)
@@ -455,7 +482,7 @@ def main() -> None:
                 estop.trigger("keyboard")
                 break
 
-            measured = robot.state(0.2)
+            measured = read_robot_state()
             left_q = measured[LEFT_ARM_MOTORS]
             right_q = measured[RIGHT_ARM_MOTORS]
             if key in ("\n", "\r") and phase == "DISARMED":
@@ -601,13 +628,30 @@ def main() -> None:
     finally:
         try:
             if enabled:
-                measured = robot.state(0.2)
-                held_left = measured[LEFT_ARM_MOTORS].copy()
-                held_right = measured[RIGHT_ARM_MOTORS].copy()
-                for _ in range(20):
-                    robot.send_arms(held_left, held_right)
-                    robot.send_inspire_hands(right_hand_command, left_hand_command)
-                    time.sleep(0.01)
+                state_is_stale = "lowstate missing or stale" in estop.reason.lower()
+                measured = None
+                if not state_is_stale:
+                    try:
+                        measured = read_robot_state()
+                    except RuntimeError:
+                        state_is_stale = True
+                if state_is_stale:
+                    robot.enter_emergency_damping()
+                    print(
+                        f"[E-STOP] LowState 不可用：持续发送双臂阻尼命令 "
+                        f"{args.estop_damping_duration:.1f}s 后退出",
+                        flush=True,
+                    )
+                    deadline = time.monotonic() + args.estop_damping_duration
+                    while time.monotonic() < deadline:
+                        time.sleep(0.05)
+                else:
+                    held_left = measured[LEFT_ARM_MOTORS].copy()
+                    held_right = measured[RIGHT_ARM_MOTORS].copy()
+                    for _ in range(20):
+                        robot.send_arms(held_left, held_right)
+                        robot.send_inspire_hands(right_hand_command, left_hand_command)
+                        time.sleep(0.01)
         finally:
             robot.stop_low_level_publisher()
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_tty)
