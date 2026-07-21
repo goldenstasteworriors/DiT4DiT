@@ -369,6 +369,11 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--initial-tolerance", type=float, default=0.01, help="READY tolerance in rad")
     parser.add_argument("--initial-hand-tolerance", type=float, default=0.02)
     parser.add_argument(
+        "--enable-initial-outer-loop-compensation",
+        action="store_true",
+        help="enable initialization/READY integral position-offset compensation; disabled by default",
+    )
+    parser.add_argument(
         "--initial-correction-rate", type=float, default=1.0,
         help="post-interpolation outer-loop correction rate in 1/s",
     )
@@ -514,6 +519,10 @@ def main() -> None:
     print(f"episode {args.episode} right/left hand states: {np.round(initial_right_hand_state, 4)} / {np.round(initial_left_hand_state, 4)}")
     print(f"episode {args.episode} right/left hand commands: {np.round(initial_right_hand_command, 4)} / {np.round(initial_left_hand_command, 4)}")
     print(f"final command: {np.round(commands[-1], 4)}")
+    print(
+        "初始化外环位置补偿: "
+        f"{'启用' if args.enable_initial_outer_loop_compensation else '关闭（默认）'}"
+    )
     if not args.arm:
         print("[DRY RUN] 最终下发序列检查通过；未连接 DDS，也未发送任何命令")
         return
@@ -617,24 +626,25 @@ def main() -> None:
                 if progress >= 1.0:
                     left_error = initial_left_pose - left_q
                     right_error = initial_pose - right_q
-                    left_init_correction = _update_pose_correction(
-                        left_init_correction,
-                        left_error,
-                        period,
-                        args.initial_correction_rate,
-                        args.initial_correction_speed,
-                        args.initial_correction_limit,
-                        args.initial_correction_deadband,
-                    )
-                    right_init_correction = _update_pose_correction(
-                        right_init_correction,
-                        right_error,
-                        period,
-                        args.initial_correction_rate,
-                        args.initial_correction_speed,
-                        args.initial_correction_limit,
-                        args.initial_correction_deadband,
-                    )
+                    if args.enable_initial_outer_loop_compensation:
+                        left_init_correction = _update_pose_correction(
+                            left_init_correction,
+                            left_error,
+                            period,
+                            args.initial_correction_rate,
+                            args.initial_correction_speed,
+                            args.initial_correction_limit,
+                            args.initial_correction_deadband,
+                        )
+                        right_init_correction = _update_pose_correction(
+                            right_init_correction,
+                            right_error,
+                            period,
+                            args.initial_correction_rate,
+                            args.initial_correction_speed,
+                            args.initial_correction_limit,
+                            args.initial_correction_deadband,
+                        )
                     left_target = np.clip(
                         initial_left_pose + left_init_correction, LEFT_ARM_LOWER, LEFT_ARM_UPPER
                     )
@@ -681,16 +691,17 @@ def main() -> None:
             elif phase == "READY":
                 left_error = initial_left_pose - left_q
                 right_error = initial_pose - right_q
-                left_init_correction = _update_pose_correction(
-                    left_init_correction, left_error, period, args.initial_correction_rate,
-                    args.initial_correction_speed, args.initial_correction_limit,
-                    args.initial_correction_deadband,
-                )
-                right_init_correction = _update_pose_correction(
-                    right_init_correction, right_error, period, args.initial_correction_rate,
-                    args.initial_correction_speed, args.initial_correction_limit,
-                    args.initial_correction_deadband,
-                )
+                if args.enable_initial_outer_loop_compensation:
+                    left_init_correction = _update_pose_correction(
+                        left_init_correction, left_error, period, args.initial_correction_rate,
+                        args.initial_correction_speed, args.initial_correction_limit,
+                        args.initial_correction_deadband,
+                    )
+                    right_init_correction = _update_pose_correction(
+                        right_init_correction, right_error, period, args.initial_correction_rate,
+                        args.initial_correction_speed, args.initial_correction_limit,
+                        args.initial_correction_deadband,
+                    )
                 left_hold = np.clip(
                     initial_left_pose + left_init_correction, LEFT_ARM_LOWER, LEFT_ARM_UPPER
                 )

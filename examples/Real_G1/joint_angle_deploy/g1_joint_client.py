@@ -834,6 +834,11 @@ def main():
     parser.add_argument("--initial-tolerance", type=float, default=0.01, help="per-joint READY tolerance in rad")
     parser.add_argument("--initial-hand-tolerance", type=float, default=0.02, help="per-finger READY tolerance")
     parser.add_argument(
+        "--enable-initial-outer-loop-compensation",
+        action="store_true",
+        help="enable initialization/READY integral position-offset compensation; disabled by default",
+    )
+    parser.add_argument(
         "--initial-correction-rate",
         type=float,
         default=1.0,
@@ -1025,6 +1030,10 @@ def main():
     print(f"episode 0 frame 0 左手实测: {np.round(initial_left_hand_state, 4)}")
     print(f"episode 0 frame 0 右手实测: {np.round(initial_right_hand_state, 4)}")
     print(f"episode 0 frame 0 双手命令: {np.round(initial_hand_command, 4)}")
+    print(
+        "初始化外环位置补偿: "
+        f"{'启用' if args.enable_initial_outer_loop_compensation else '关闭（默认）'}"
+    )
     print("SPACE/Q=急停；ENTER=开始抬臂初始化；到达 READY 后按 L 才启动模型。")
     enabled = False
     phase = "DRY_RUN" if not args.arm else "DISARMED"
@@ -1092,24 +1101,25 @@ def main():
                 if progress >= 1.0:
                     left_error = initial_left_pose - left_arm_q
                     right_error = initial_pose - arm_q
-                    left_init_correction = _update_pose_correction(
-                        left_init_correction,
-                        left_error,
-                        period,
-                        args.initial_correction_rate,
-                        args.initial_correction_speed,
-                        args.initial_correction_limit,
-                        args.initial_correction_deadband,
-                    )
-                    right_init_correction = _update_pose_correction(
-                        right_init_correction,
-                        right_error,
-                        period,
-                        args.initial_correction_rate,
-                        args.initial_correction_speed,
-                        args.initial_correction_limit,
-                        args.initial_correction_deadband,
-                    )
+                    if args.enable_initial_outer_loop_compensation:
+                        left_init_correction = _update_pose_correction(
+                            left_init_correction,
+                            left_error,
+                            period,
+                            args.initial_correction_rate,
+                            args.initial_correction_speed,
+                            args.initial_correction_limit,
+                            args.initial_correction_deadband,
+                        )
+                        right_init_correction = _update_pose_correction(
+                            right_init_correction,
+                            right_error,
+                            period,
+                            args.initial_correction_rate,
+                            args.initial_correction_speed,
+                            args.initial_correction_limit,
+                            args.initial_correction_deadband,
+                        )
                     left_target = np.clip(initial_left_pose + left_init_correction, LEFT_ARM_LOWER, LEFT_ARM_UPPER)
                     target = np.clip(initial_pose + right_init_correction, RIGHT_ARM_LOWER, RIGHT_ARM_UPPER)
                 robot.send_arms(left_target, target)
@@ -1169,24 +1179,25 @@ def main():
                 if phase == "READY":
                     left_error = initial_left_pose - left_arm_q
                     right_error = initial_pose - arm_q
-                    left_init_correction = _update_pose_correction(
-                        left_init_correction,
-                        left_error,
-                        period,
-                        args.initial_correction_rate,
-                        args.initial_correction_speed,
-                        args.initial_correction_limit,
-                        args.initial_correction_deadband,
-                    )
-                    right_init_correction = _update_pose_correction(
-                        right_init_correction,
-                        right_error,
-                        period,
-                        args.initial_correction_rate,
-                        args.initial_correction_speed,
-                        args.initial_correction_limit,
-                        args.initial_correction_deadband,
-                    )
+                    if args.enable_initial_outer_loop_compensation:
+                        left_init_correction = _update_pose_correction(
+                            left_init_correction,
+                            left_error,
+                            period,
+                            args.initial_correction_rate,
+                            args.initial_correction_speed,
+                            args.initial_correction_limit,
+                            args.initial_correction_deadband,
+                        )
+                        right_init_correction = _update_pose_correction(
+                            right_init_correction,
+                            right_error,
+                            period,
+                            args.initial_correction_rate,
+                            args.initial_correction_speed,
+                            args.initial_correction_limit,
+                            args.initial_correction_deadband,
+                        )
                     left_hold = np.clip(initial_left_pose + left_init_correction, LEFT_ARM_LOWER, LEFT_ARM_UPPER)
                     right_hold = np.clip(initial_pose + right_init_correction, RIGHT_ARM_LOWER, RIGHT_ARM_UPPER)
                     robot.send_arms(left_hold, right_hold)
