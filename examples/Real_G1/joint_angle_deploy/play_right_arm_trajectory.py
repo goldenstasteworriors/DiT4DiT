@@ -181,28 +181,35 @@ def temporal_ensemble_hand(action_chunks: np.ndarray) -> np.ndarray:
 
 def load_full_episode(path: Path, aggregation: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
     with np.load(path) as data:
-        required = {"timestamps", "input_states", "predicted_action_chunks", "first_predicted_actions"}
+        required = {"timestamps", "input_states", "first_predicted_actions"}
         missing = required.difference(data.files)
         if missing:
             raise ValueError(f"NPZ missing arrays: {sorted(missing)}")
         timestamps = np.asarray(data["timestamps"], dtype=np.float64)
         input_states = np.asarray(data["input_states"], dtype=np.float64)
-        chunks = np.asarray(data["predicted_action_chunks"], dtype=np.float64)
+        chunks = (
+            np.asarray(data["predicted_action_chunks"], dtype=np.float64)
+            if "predicted_action_chunks" in data.files
+            else None
+        )
         first_actions = np.asarray(data["first_predicted_actions"], dtype=np.float64)
 
     episode_length = len(timestamps)
     if input_states.shape != (episode_length, 13):
         raise ValueError(f"input_states must be [T,13], got {input_states.shape}")
-    if chunks.shape != (episode_length, 16, 13):
+    if chunks is not None and chunks.shape != (episode_length, 16, 13):
         raise ValueError(f"predicted_action_chunks must be [T,16,13], got {chunks.shape}")
     if first_actions.shape != (episode_length, 13):
         raise ValueError(f"first_predicted_actions must be [T,13], got {first_actions.shape}")
     if episode_length < 2 or np.any(np.diff(timestamps) <= 0.0):
         raise ValueError("timestamps must contain at least two strictly increasing values")
-    if not all(np.isfinite(array).all() for array in (timestamps, input_states, chunks, first_actions)):
+    arrays = (timestamps, input_states, first_actions) + (() if chunks is None else (chunks,))
+    if not all(np.isfinite(array).all() for array in arrays):
         raise ValueError("trajectory contains NaN or Inf")
 
     if aggregation == "temporal-ensemble":
+        if chunks is None:
+            raise ValueError("temporal-ensemble requires predicted_action_chunks")
         targets = temporal_ensemble(chunks)
     else:
         targets = first_actions[:, :7].copy()

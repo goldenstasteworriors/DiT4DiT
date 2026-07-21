@@ -1,0 +1,15 @@
+{
+  "source": "continuous first-step wrist-delta integration",
+  "episode": 0,
+  "frames": 607,
+  "fps": 50.000047683761295,
+  "input": "/home/ykj/project/WM/DiT4DiT/inference_records/wrist_delta_steps_160000_episode_000000_full.npz",
+  "source_parquet": "/home/ykj/project/SONICMJ/GR00T-WholeBodyControl/outputs/pick_up_pipette/data/chunk-000/episode_000000.parquet",
+  "model": "/home/ykj/project/WM/DiT4DiT/decoupled_wbc/gr00t_wbc/control/robot_model/model_data/g1/g1_29dof_with_hand.xml",
+  "ground_truth_wrist_resets": 1,
+  "right_arm_mae_rad": 0.15578244363949592,
+  "final_wrist_position_error_m": 0.019348850269501748,
+  "ik_position_residual_max_m": 1.6616455783427308e-05,
+  "ik_orientation_residual_max_rad": 7.441748384144555e-05,
+  "npz": "joints_steps_160000_episode_000000_continuous_first_step.npz"
+}
