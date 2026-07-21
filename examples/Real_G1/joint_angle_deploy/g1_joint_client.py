@@ -43,12 +43,12 @@ LEFT_ARM_LOWER = np.array([-3.0892, -1.5882, -2.618, -1.0472, -1.9722, -1.6144, 
 LEFT_ARM_UPPER = np.array([2.6704, 2.2515, 2.618, 2.0944, 1.9722, 1.6144, 1.6144])
 RIGHT_ARM_LOWER = np.array([-3.0892, -2.2515, -2.618, -1.0472, -1.9722, -1.6144, -1.6144])
 RIGHT_ARM_UPPER = np.array([2.6704, 1.5882, 2.618, 2.0944, 1.9722, 1.6144, 1.6144])
-# Exact observation.state at timestamp=3.0 s (row 150) of training episode 0.
+# Exact frame-0 observation.state from the original training episode 0.
 DEFAULT_INITIAL_LEFT_ARM = np.array(
-    [0.13316871, 0.16294952, 0.43247473, -0.27756664, -0.15438078, 0.03934421, -0.23063642]
+    [0.12029766, 0.16296150, 0.46878693, -0.27993950, -0.15619041, 0.07666309, -0.24765402]
 )
 DEFAULT_INITIAL_RIGHT_ARM = np.array(
-    [-0.36188766, -0.19208317, 0.33666086, -0.45916361, 0.39308259, 0.59385431, -0.44077981]
+    [0.01070191, -0.23347668, -0.07287607, -0.58485419, 0.36513537, 0.41992724, -0.25048229]
 )
 DEFAULT_INITIAL_LEFT_HAND_STATE = np.array([0.99900001, 0.99800003, 0.99800003, 0.99800003, 0.99900001, 0.98299998])
 DEFAULT_INITIAL_RIGHT_HAND_STATE = np.array([0.99800003, 1.0, 0.99800003, 0.99800003, 0.99900001, 0.98400003])
@@ -665,7 +665,7 @@ def main():
         nargs=7,
         default=DEFAULT_INITIAL_LEFT_ARM.tolist(),
         metavar=("SP", "SR", "SY", "E", "WR", "WP", "WY"),
-        help="left-arm deployment pose; default is episode 0 observation.state at 3.0 s",
+        help="left-arm deployment pose; default is the exact episode-0 frame-0 observation.state",
     )
     parser.add_argument(
         "--initial-right-arm",
@@ -673,7 +673,7 @@ def main():
         nargs=7,
         default=DEFAULT_INITIAL_RIGHT_ARM.tolist(),
         metavar=("SP", "SR", "SY", "E", "WR", "WP", "WY"),
-        help="right-arm deployment pose; default is episode 0 observation.state at 3.0 s",
+        help="right-arm deployment pose; default is the exact episode-0 frame-0 observation.state",
     )
     parser.add_argument(
         "--initial-right-hand-state",
@@ -779,11 +779,11 @@ def main():
     ):
         if np.any(values < 0.0) or np.any(values > 1.0):
             raise SystemExit(f"{name} must be normalized to [0, 1]")
-    print(f"episode 0 @ 3.0s 左臂目标: {np.round(initial_left_pose, 4)}")
-    print(f"episode 0 @ 3.0s 右臂目标: {np.round(initial_pose, 4)}")
-    print(f"episode 0 @ 3.0s 左手实测: {np.round(initial_left_hand_state, 4)}")
-    print(f"episode 0 @ 3.0s 右手实测: {np.round(initial_right_hand_state, 4)}")
-    print(f"episode 0 @ 3.0s 双手命令: {np.round(initial_hand_command, 4)}")
+    print(f"episode 0 frame 0 左臂目标: {np.round(initial_left_pose, 4)}")
+    print(f"episode 0 frame 0 右臂目标: {np.round(initial_pose, 4)}")
+    print(f"episode 0 frame 0 左手实测: {np.round(initial_left_hand_state, 4)}")
+    print(f"episode 0 frame 0 右手实测: {np.round(initial_right_hand_state, 4)}")
+    print(f"episode 0 frame 0 双手命令: {np.round(initial_hand_command, 4)}")
     print("SPACE/Q=急停；ENTER=开始抬臂初始化；到达 READY 后按 L 才启动模型。")
     enabled = False
     phase = "DRY_RUN" if not args.arm else "DISARMED"
