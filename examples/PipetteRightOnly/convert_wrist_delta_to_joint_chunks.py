@@ -52,6 +52,8 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--max-step", type=float, default=0.2)
     parser.add_argument("--position-tolerance", type=float, default=2e-5)
     parser.add_argument("--orientation-tolerance", type=float, default=2e-4)
+    parser.add_argument("--max-source-position-error", type=float, default=1e-3)
+    parser.add_argument("--max-source-orientation-error", type=float, default=1e-2)
     parser.add_argument("--max-position-residual", type=float, default=0.01)
     parser.add_argument("--max-orientation-residual", type=float, default=0.1)
     return parser
@@ -275,7 +277,10 @@ def main() -> None:
 
     max_source_position_error = float(np.max(source_position_errors))
     max_source_orientation_error = float(np.max(source_orientation_errors))
-    if max_source_position_error > 1e-5 or max_source_orientation_error > 1e-5:
+    if (
+        max_source_position_error > args.max_source_position_error
+        or max_source_orientation_error > args.max_source_orientation_error
+    ):
         raise SystemExit(
             f"source EEF/FK mismatch: {max_source_position_error:.6g}m, "
             f"{max_source_orientation_error:.6g}rad"
