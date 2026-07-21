@@ -392,6 +392,16 @@ def build_argparser() -> argparse.ArgumentParser:
         "--lower-body-mode", choices=("damping", "zero-torque"), default="damping"
     )
     parser.add_argument(
+        "--no-gravity-compensation", action="store_true",
+        help="disable the default full-time dual-arm Pinocchio/RNEA gravity feed-forward",
+    )
+    parser.add_argument(
+        "--gravity-urdf", type=Path,
+        default=Path(__file__).resolve().parents[3]
+        / "decoupled_wbc/gr00t_wbc/control/robot_model/model_data/g1/g1_29dof.urdf",
+    )
+    parser.add_argument("--gravity-scale", type=float, default=1.0, help="gravity feed-forward scale in [0,1]")
+    parser.add_argument(
         "--record-dir",
         type=Path,
         default=DEFAULT_RECORDS_DIR / "trajectory_tracking",
@@ -426,6 +436,8 @@ def main() -> None:
         raise SystemExit("initial correction and stable-duration arguments must be non-negative")
     if args.initial_correction_deadband >= args.initial_tolerance:
         raise SystemExit("--initial-correction-deadband must be smaller than --initial-tolerance")
+    if not 0.0 <= args.gravity_scale <= 1.0:
+        raise SystemExit("--gravity-scale must be in [0, 1]")
     if min(
         args.lowstate_warning_age,
         args.lowstate_timeout,
@@ -515,7 +527,13 @@ def main() -> None:
         _update_pose_correction,
     )
 
-    robot = G1DDS(args.network_interface, args.lower_body_mode)
+    robot = G1DDS(
+        args.network_interface,
+        args.lower_body_mode,
+        gravity_compensation=not args.no_gravity_compensation,
+        gravity_urdf=args.gravity_urdf,
+        gravity_scale=args.gravity_scale,
+    )
     recorder = None
     if not args.no_record:
         timestamp = time.strftime("%Y%m%d_%H%M%S")

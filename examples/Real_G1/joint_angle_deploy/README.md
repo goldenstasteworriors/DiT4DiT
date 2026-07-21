@@ -162,7 +162,12 @@ conda run --no-capture-output -n decoupled_vla_collection python \
 minimum-jerk 插值结束后，初始化使用与在线部署相同的双臂外环误差修正：默认积分率
 `1.0/s`、修正速度上限 `0.03 rad/s`、修正偏置上限 `0.15 rad`、死区 `0.003 rad`，
 所有关节误差需连续1秒保持在 `0.01 rad` 内才进入 `READY`。内环使用
-`g1_joint_client.py` 中相同的手臂 Kp/Kd。
+`g1_joint_client.py` 中相同的手臂 Kp/Kd，并默认在初始化、READY、轨迹播放/在线推理和
+末姿态保持的每个100 Hz下发周期，使用 Pinocchio RNEA 计算双臂目标姿态的重力前馈力矩。
+该实现与 xrteleoperate 相同：腿和腰锁定在 URDF 中性位构造14-DoF双臂 reduced model，
+将 `rnea(q, 0, 0)` 写入双臂 `motor_cmd.tau`；急停阻尼阶段强制将前馈力矩清零。
+可用 `--gravity-scale 0.0~1.0` 保守缩放，或仅在诊断时用
+`--no-gravity-compensation` 关闭；默认使用 `decoupled_wbc` 中的 G1 29-DoF URDF。
 双手同时初始化到原始首帧的 `action.wbc` 手部命令，并以 `observation.state` 手部状态
 检查 READY；默认手部容差为0.02。播放时右手使用推理输出后6维，经过相同 temporal
 ensemble 和2倍慢放，再以 `--max-hand-speed 0.5` 限速；`--hand-frequency 10`

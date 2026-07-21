@@ -54,6 +54,67 @@ DEFAULT_INITIAL_RIGHT_ARM = np.array(
 DEFAULT_INITIAL_LEFT_HAND_STATE = np.array([0.99900001, 0.99800003, 0.99800003, 0.99800003, 0.99900001, 0.98299998])
 DEFAULT_INITIAL_RIGHT_HAND_STATE = np.array([0.99800003, 1.0, 0.99800003, 0.99800003, 0.99900001, 0.98400003])
 DEFAULT_INITIAL_HAND_COMMAND = np.ones(6, dtype=np.float64)
+DEFAULT_GRAVITY_URDF = (
+    PROJECT_ROOT
+    / "decoupled_wbc/gr00t_wbc/control/robot_model/model_data/g1/g1_29dof.urdf"
+)
+ARM_JOINT_NAMES = (
+    "left_shoulder_pitch_joint", "left_shoulder_roll_joint", "left_shoulder_yaw_joint",
+    "left_elbow_joint", "left_wrist_roll_joint", "left_wrist_pitch_joint",
+    "left_wrist_yaw_joint", "right_shoulder_pitch_joint", "right_shoulder_roll_joint",
+    "right_shoulder_yaw_joint", "right_elbow_joint", "right_wrist_roll_joint",
+    "right_wrist_pitch_joint", "right_wrist_yaw_joint",
+)
+
+
+class ArmGravityCompensator:
+    """Pinocchio/RNEA gravity feed-forward matching xrteleoperate's dual-arm control."""
+
+    def __init__(self, urdf_path: Path, scale: float = 1.0):
+        try:
+            import pinocchio as pin
+        except ImportError as exc:
+            raise RuntimeError(
+                "gravity compensation requires pinocchio; run in the documented "
+                "decoupled_vla_collection conda environment"
+            ) from exc
+        path = urdf_path.expanduser().resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"gravity-compensation URDF not found: {path}")
+        if not np.isfinite(scale) or scale < 0.0 or scale > 1.0:
+            raise ValueError("gravity-compensation scale must be in [0, 1]")
+        full_model = pin.buildModelFromUrdf(str(path))
+        missing = [name for name in ARM_JOINT_NAMES if not full_model.existJointName(name)]
+        if missing:
+            raise ValueError(f"gravity-compensation URDF is missing arm joints: {missing}")
+        arm_ids = {full_model.getJointId(name) for name in ARM_JOINT_NAMES}
+        locked_ids = [joint_id for joint_id in range(1, full_model.njoints) if joint_id not in arm_ids]
+        self._pin = pin
+        self._model = pin.buildReducedModel(
+            full_model, locked_ids, pin.neutral(full_model)
+        )
+        self._data = self._model.createData()
+        reduced_names = tuple(self._model.names[1:])
+        if self._model.nq != 14 or self._model.nv != 14 or reduced_names != ARM_JOINT_NAMES:
+            raise ValueError(
+                "unexpected reduced G1 arm model: "
+                f"nq={self._model.nq}, nv={self._model.nv}, joints={reduced_names}"
+            )
+        self._scale = float(scale)
+        self._effort_limits = np.asarray(self._model.effortLimit, dtype=np.float64)
+        print(f"[GRAVITY] 双臂 Pinocchio/RNEA 重力补偿已启用，scale={self._scale:.3f}，URDF={path}")
+
+    def compute(self, left_target: np.ndarray, right_target: np.ndarray) -> np.ndarray:
+        q = np.concatenate((left_target, right_target)).astype(np.float64, copy=False)
+        if q.shape != (14,) or not np.isfinite(q).all():
+            raise ValueError("gravity compensation requires 14 finite arm targets")
+        tau = np.asarray(
+            self._pin.rnea(self._model, self._data, q, np.zeros(14), np.zeros(14)),
+            dtype=np.float64,
+        ) * self._scale
+        if tau.shape != (14,) or not np.isfinite(tau).all():
+            raise RuntimeError("Pinocchio returned invalid gravity-compensation torques")
+        return np.clip(tau, -self._effort_limits, self._effort_limits)
 
 
 def _relative_wrist_state(
@@ -403,7 +464,14 @@ class CameraStream:
 
 
 class G1DDS:
-    def __init__(self, network_interface: str, lower_body_mode: str = "damping"):
+    def __init__(
+        self,
+        network_interface: str,
+        lower_body_mode: str = "damping",
+        gravity_compensation: bool = True,
+        gravity_urdf: Path = DEFAULT_GRAVITY_URDF,
+        gravity_scale: float = 1.0,
+    ):
         from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelPublisher, ChannelSubscriber
         from unitree_sdk2py.comm.motion_switcher.motion_switcher_client import MotionSwitcherClient
         from unitree_sdk2py.idl.default import unitree_hg_msg_dds__LowCmd_
@@ -436,6 +504,11 @@ class G1DDS:
         self._emergency_damping = False
         self._left_arm_target = None
         self._right_arm_target = None
+        self._gravity = (
+            ArmGravityCompensator(gravity_urdf, gravity_scale)
+            if gravity_compensation
+            else None
+        )
         self._publisher_stop = threading.Event()
         self._publisher_thread = None
         self._motion_switcher = MotionSwitcherClient()
@@ -595,6 +668,11 @@ class G1DDS:
             right_target = self._right_arm_target.copy()
             left_target = self._left_arm_target.copy()
             emergency_damping = self._emergency_damping
+        arm_tauff = (
+            np.zeros(14, dtype=np.float64)
+            if emergency_damping or self._gravity is None
+            else self._gravity.compute(left_target, right_target)
+        )
         self._cmd.level_flag = 0xFF
         self._cmd.mode_pr = 0
         self._cmd.mode_machine = self._mode_machine
@@ -613,11 +691,13 @@ class G1DDS:
                     motor.kd = 0.0
             elif i in LEFT_ARM_MOTORS:
                 arm_index = i - LEFT_ARM_MOTORS[0]
+                motor.tau = float(arm_tauff[arm_index])
                 motor.q = POS_STOP_F if emergency_damping else float(left_target[arm_index])
                 motor.kp = 0.0 if emergency_damping else float(ARM_KP[arm_index])
                 motor.kd = float(ARM_KD[arm_index])
             else:
                 arm_index = i - RIGHT_ARM_MOTORS[0]
+                motor.tau = float(arm_tauff[7 + arm_index])
                 motor.q = POS_STOP_F if emergency_damping else float(right_target[arm_index])
                 motor.kp = 0.0 if emergency_damping else float(ARM_KP[arm_index])
                 motor.kd = float(ARM_KD[arm_index])
@@ -678,6 +758,15 @@ def main():
         choices=("damping", "zero-torque"),
         default="damping",
         help="legs/waist receive no position target; damping is the safer default",
+    )
+    parser.add_argument(
+        "--no-gravity-compensation", action="store_true",
+        help="disable the default full-time dual-arm Pinocchio/RNEA gravity feed-forward",
+    )
+    parser.add_argument("--gravity-urdf", type=Path, default=DEFAULT_GRAVITY_URDF)
+    parser.add_argument(
+        "--gravity-scale", type=float, default=1.0,
+        help="gravity feed-forward scale in [0,1]",
     )
     parser.add_argument("--camera", default="0", help="local OpenCV camera index/URL; used only when --camera-host is empty")
     parser.add_argument("--camera-host", default="192.168.123.164", help="SONIC robot camera server; pass an empty string for local camera")
@@ -838,6 +927,8 @@ def main():
         raise SystemExit("camera stale warning/log intervals must be positive")
     if args.estop_damping_duration <= 0.0:
         raise SystemExit("estop-damping-duration must be positive")
+    if not 0.0 <= args.gravity_scale <= 1.0:
+        raise SystemExit("gravity-scale must be in [0, 1]")
     if min(args.lowstate_warning_age, args.lowstate_timeout, args.lowstate_warning_interval) <= 0.0:
         raise SystemExit("LowState watchdog parameters must be positive")
     if args.lowstate_warning_age >= args.lowstate_timeout:
@@ -855,7 +946,13 @@ def main():
     ) <= 0:
         raise SystemExit("IK and wrist-delta safety parameters must be positive")
 
-    robot = G1DDS(args.network_interface, args.lower_body_mode)
+    robot = G1DDS(
+        args.network_interface,
+        args.lower_body_mode,
+        gravity_compensation=not args.no_gravity_compensation,
+        gravity_urdf=args.gravity_urdf,
+        gravity_scale=args.gravity_scale,
+    )
 
     def read_robot_state() -> np.ndarray:
         return robot.state(
