@@ -170,6 +170,11 @@ Kp/Kd 与全程重力补偿。需要恢复外环时显式添加
 将 `rnea(q, 0, 0)` 写入双臂 `motor_cmd.tau`；急停阻尼阶段强制将前馈力矩清零。
 可用 `--gravity-scale 0.0~1.0` 保守缩放，或仅在诊断时用
 `--no-gravity-compensation` 关闭；默认使用 `decoupled_wbc` 中的 G1 29-DoF URDF。
+末端惯性默认使用 `--gravity-hand-model rh56dftp`：依据 Unitree G1 官方描述包中的
+`g1_29dof_rev_1_0_with_inspire_hand_FTP.urdf`，将每只 RH56DFTP 的完整手指模型折算为
+`0.8783 kg` 的等效质量和对应质心，加入腕关节的 Pinocchio 动力学模型。该折算对静态
+RNEA 重力矩与完整 FTP URDF 等价。`--gravity-hand-model rubber` 可回退到旧的
+`0.170 kg` rubber-hand 模型，仅用于对照，不适合当前实机。
 双手同时初始化到原始首帧的 `action.wbc` 手部命令，并以 `observation.state` 手部状态
 检查 READY；默认手部容差为0.02。播放时右手使用推理输出后6维，经过相同 temporal
 ensemble 和2倍慢放，再以 `--max-hand-speed 0.5` 限速；`--hand-frequency 10`

@@ -65,12 +65,23 @@ ARM_JOINT_NAMES = (
     "right_shoulder_yaw_joint", "right_elbow_joint", "right_wrist_roll_joint",
     "right_wrist_pitch_joint", "right_wrist_yaw_joint",
 )
+# Lumped RH56DFTP hand properties derived from Unitree's
+# g1_29dof_rev_1_0_with_inspire_hand_FTP.urdf with all finger joints neutral.
+# The base G1 URDF already contains a 0.170 kg rubber hand on each wrist, so
+# adding these positive point-mass equivalents makes its total hand mass and
+# first moment exactly match the full 0.8783 kg FTP model. Static RNEA gravity
+# depends on mass and first moment, not the rotational inertia about the COM.
+RH56DFTP_ADDED_MASS = 0.7083
+RH56DFTP_ADDED_COM = {
+    "left_wrist_yaw_joint": np.array([0.15747250, -0.00100931, 0.00611444]),
+    "right_wrist_yaw_joint": np.array([0.14823332, 0.00155904, 0.00618849]),
+}
 
 
 class ArmGravityCompensator:
     """Pinocchio/RNEA gravity feed-forward matching xrteleoperate's dual-arm control."""
 
-    def __init__(self, urdf_path: Path, scale: float = 1.0):
+    def __init__(self, urdf_path: Path, scale: float = 1.0, hand_model: str = "rh56dftp"):
         try:
             import pinocchio as pin
         except ImportError as exc:
@@ -83,10 +94,19 @@ class ArmGravityCompensator:
             raise FileNotFoundError(f"gravity-compensation URDF not found: {path}")
         if not np.isfinite(scale) or scale < 0.0 or scale > 1.0:
             raise ValueError("gravity-compensation scale must be in [0, 1]")
+        if hand_model not in ("rh56dftp", "rubber"):
+            raise ValueError(f"unsupported gravity hand model: {hand_model}")
         full_model = pin.buildModelFromUrdf(str(path))
         missing = [name for name in ARM_JOINT_NAMES if not full_model.existJointName(name)]
         if missing:
             raise ValueError(f"gravity-compensation URDF is missing arm joints: {missing}")
+        if hand_model == "rh56dftp":
+            zero_inertia = np.zeros((3, 3), dtype=np.float64)
+            for joint_name, com in RH56DFTP_ADDED_COM.items():
+                joint_id = full_model.getJointId(joint_name)
+                full_model.inertias[joint_id] += pin.Inertia(
+                    RH56DFTP_ADDED_MASS, com, zero_inertia
+                )
         arm_ids = {full_model.getJointId(name) for name in ARM_JOINT_NAMES}
         locked_ids = [joint_id for joint_id in range(1, full_model.njoints) if joint_id not in arm_ids]
         self._pin = pin
@@ -102,7 +122,10 @@ class ArmGravityCompensator:
             )
         self._scale = float(scale)
         self._effort_limits = np.asarray(self._model.effortLimit, dtype=np.float64)
-        print(f"[GRAVITY] 双臂 Pinocchio/RNEA 重力补偿已启用，scale={self._scale:.3f}，URDF={path}")
+        print(
+            "[GRAVITY] 双臂 Pinocchio/RNEA 重力补偿已启用，"
+            f"scale={self._scale:.3f}，hand_model={hand_model}，URDF={path}"
+        )
 
     def compute(self, left_target: np.ndarray, right_target: np.ndarray) -> np.ndarray:
         q = np.concatenate((left_target, right_target)).astype(np.float64, copy=False)
@@ -471,6 +494,7 @@ class G1DDS:
         gravity_compensation: bool = True,
         gravity_urdf: Path = DEFAULT_GRAVITY_URDF,
         gravity_scale: float = 1.0,
+        gravity_hand_model: str = "rh56dftp",
     ):
         from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelPublisher, ChannelSubscriber
         from unitree_sdk2py.comm.motion_switcher.motion_switcher_client import MotionSwitcherClient
@@ -505,7 +529,7 @@ class G1DDS:
         self._left_arm_target = None
         self._right_arm_target = None
         self._gravity = (
-            ArmGravityCompensator(gravity_urdf, gravity_scale)
+            ArmGravityCompensator(gravity_urdf, gravity_scale, gravity_hand_model)
             if gravity_compensation
             else None
         )
@@ -768,6 +792,10 @@ def main():
         "--gravity-scale", type=float, default=1.0,
         help="gravity feed-forward scale in [0,1]",
     )
+    parser.add_argument(
+        "--gravity-hand-model", choices=("rh56dftp", "rubber"), default="rh56dftp",
+        help="end-effector inertial model; defaults to the installed RH56DFTP hand",
+    )
     parser.add_argument("--camera", default="0", help="local OpenCV camera index/URL; used only when --camera-host is empty")
     parser.add_argument("--camera-host", default="192.168.123.164", help="SONIC robot camera server; pass an empty string for local camera")
     parser.add_argument("--camera-port", type=int, default=5555)
@@ -957,6 +985,7 @@ def main():
         gravity_compensation=not args.no_gravity_compensation,
         gravity_urdf=args.gravity_urdf,
         gravity_scale=args.gravity_scale,
+        gravity_hand_model=args.gravity_hand_model,
     )
 
     def read_robot_state() -> np.ndarray:

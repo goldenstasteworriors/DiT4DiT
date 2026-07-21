@@ -407,6 +407,10 @@ def build_argparser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--gravity-scale", type=float, default=1.0, help="gravity feed-forward scale in [0,1]")
     parser.add_argument(
+        "--gravity-hand-model", choices=("rh56dftp", "rubber"), default="rh56dftp",
+        help="end-effector inertial model; defaults to the installed RH56DFTP hand",
+    )
+    parser.add_argument(
         "--record-dir",
         type=Path,
         default=DEFAULT_RECORDS_DIR / "trajectory_tracking",
@@ -542,6 +546,7 @@ def main() -> None:
         gravity_compensation=not args.no_gravity_compensation,
         gravity_urdf=args.gravity_urdf,
         gravity_scale=args.gravity_scale,
+        gravity_hand_model=args.gravity_hand_model,
     )
     recorder = None
     if not args.no_record:
