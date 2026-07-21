@@ -13,6 +13,7 @@ JOINT_GPUS=${JOINT_GPUS:-0,1,2,3}
 WRIST_GPUS=${WRIST_GPUS:-4,5,6,7}
 TARGET_JOINT_GPUS=${TARGET_JOINT_GPUS:-8,9,10,11}
 BIMANUAL_GPUS=${BIMANUAL_GPUS:-12,13,14,15}
+RUN_FILTER=${RUN_FILTER:-all}
 
 if [[ ! -x "${PYTHON}" ]]; then
   echo "Project environment is unavailable: ${PYTHON}" >&2
@@ -98,7 +99,15 @@ start_run() {
   echo "${run_id}: devices=${devices}, pid=$(<"${run_dir}/launcher.pid")"
 }
 
-start_run grab_red_bottle_right_joints_action_dit "${JOINT_GPUS}" 29641 pipette_right_joints 16 42
-start_run grab_red_bottle_right_wrist_delta_action_dit "${WRIST_GPUS}" 29642 pipette_right_wrist_delta 16 43
-start_run grab_red_bottle_right_target_joints_action_dit "${TARGET_JOINT_GPUS}" 29643 pipette_right_target_joints 16 44
-start_run grab_red_bottle_bimanual_wrist_delta_action_dit "${BIMANUAL_GPUS}" 29644 pipette_bimanual_wrist_delta 32 45
+should_start() {
+  [[ "${RUN_FILTER}" == "all" || ",${RUN_FILTER}," == *",$1,"* ]]
+}
+
+should_start right_joints && \
+  start_run grab_red_bottle_right_joints_action_dit "${JOINT_GPUS}" 29641 pipette_right_joints 16 42
+should_start right_wrist_delta && \
+  start_run grab_red_bottle_right_wrist_delta_action_dit "${WRIST_GPUS}" 29642 pipette_right_wrist_delta 16 43
+should_start right_target_joints && \
+  start_run grab_red_bottle_right_target_joints_action_dit "${TARGET_JOINT_GPUS}" 29643 pipette_right_target_joints 16 44
+should_start bimanual_wrist_delta && \
+  start_run grab_red_bottle_bimanual_wrist_delta_action_dit "${BIMANUAL_GPUS}" 29644 pipette_bimanual_wrist_delta 32 45
