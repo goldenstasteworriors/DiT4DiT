@@ -2,8 +2,8 @@ run_id: pipette_right_wrist_delta_action_dit
 run_root_dir: /home/nvme02/DiT4DiT_runs
 seed: 43
 trackers: [jsonl, wandb]
-wandb_entity: 2004kjy666-huazhong-university-of-science-and-technology
-wandb_project: DiT4DiT_Pipette_RightOnly
+wandb_entity: ttyyc-hust
+wandb_project: pipette_right_wrist_delta_action_dit
 is_debug: false
 
 framework:

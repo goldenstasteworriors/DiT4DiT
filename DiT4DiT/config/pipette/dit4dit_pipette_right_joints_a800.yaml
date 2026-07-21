@@ -3,7 +3,7 @@ run_root_dir: /workspace/WM/dit4dit/DiT4DiT_runs
 seed: 42
 trackers: [jsonl, wandb]
 wandb_entity: ttyyc-hust
-wandb_project: DiT4DiT_Pipette_RightOnly
+wandb_project: pipette_right_joints_action_dit
 is_debug: false
 
 framework:

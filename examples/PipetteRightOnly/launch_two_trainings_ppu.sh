@@ -41,7 +41,8 @@ export HGGC_DRIVER_CANDIDATE=UMD
 
 export PYTHONPATH="${ROOT}:${PYTHONPATH:-}"
 export PYTHONNOUSERSITE=1
-export WANDB_MODE=${WANDB_MODE:-offline}
+export WANDB_API_KEY=${WANDB_API_KEY:-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}
+export WANDB_MODE=${WANDB_MODE:-online}
 export HF_HOME=${HF_HOME:-/workspace/WM/DiT4DiT_cache/huggingface}
 export TORCH_HOME=${TORCH_HOME:-/workspace/WM/DiT4DiT_cache/torch}
 export XDG_CACHE_HOME=${XDG_CACHE_HOME:-/workspace/WM/DiT4DiT_cache/xdg}
