@@ -1182,6 +1182,68 @@ class PipetteRightWristDeltaDataConfig(BaseDataConfig):
         return ComposedModalityTransform(transforms=transforms)
 
 
+class PipetteRightTargetJointsDataConfig(PipetteRightJointsDataConfig):
+    """Right-arm target joints as both the current state and future action representation."""
+
+    state_keys = ["state.right_arm_target", "state.right_hand_target"]
+
+
+class PipetteBimanualWristDeltaDataConfig(BaseDataConfig):
+    """Bimanual wrist-relative SE(3) and dexterous-hand representation."""
+
+    video_keys = ["video.ego_view"]
+    state_keys = [
+        "state.left_wrist_pos",
+        "state.left_wrist_abs_quat",
+        "state.left_hand",
+        "state.right_wrist_pos",
+        "state.right_wrist_abs_quat",
+        "state.right_hand",
+    ]
+    action_keys = [
+        "action.left_wrist_delta_pos",
+        "action.left_wrist_delta_rot_6d",
+        "action.left_hand",
+        "action.right_wrist_delta_pos",
+        "action.right_wrist_delta_rot_6d",
+        "action.right_hand",
+    ]
+    language_keys = ["annotation.human.task_description"]
+    observation_indices = [-1, 0]
+    action_indices = list(range(16))
+
+    def modality_config(self):
+        return {
+            "video": ModalityConfig(delta_indices=self.observation_indices, modality_keys=self.video_keys),
+            "state": ModalityConfig(delta_indices=self.observation_indices, modality_keys=self.state_keys),
+            "action": ModalityConfig(delta_indices=self.action_indices, modality_keys=self.action_keys),
+            "language": ModalityConfig(delta_indices=self.observation_indices, modality_keys=self.language_keys),
+        }
+
+    def transform(self):
+        transforms = [
+            WristAbsoluteToRelativeTransform(
+                apply_to=self.state_keys,
+                position_key="state.left_wrist_pos",
+                quaternion_key="state.left_wrist_abs_quat",
+                passthrough_keys=["state.left_hand"],
+            ),
+            WristAbsoluteToRelativeTransform(
+                apply_to=self.state_keys,
+                position_key="state.right_wrist_pos",
+                quaternion_key="state.right_wrist_abs_quat",
+                passthrough_keys=["state.right_hand"],
+            ),
+            StateActionToTensor(apply_to=self.state_keys),
+            StateActionToTensor(apply_to=self.action_keys),
+            StateActionTransform(
+                apply_to=self.action_keys,
+                normalization_modes={key: "q99" for key in self.action_keys},
+            ),
+        ]
+        return ComposedModalityTransform(transforms=transforms)
+
+
 
 ROBOT_TYPE_CONFIG_MAP = {
     "libero_franka": Libero4in1DataConfig(),
@@ -1199,4 +1261,6 @@ ROBOT_TYPE_CONFIG_MAP = {
     "g1_body29_aloha_full_body": UnitreeG1AlohaFullBodyDataConfig(),
     "pipette_right_joints": PipetteRightJointsDataConfig(),
     "pipette_right_wrist_delta": PipetteRightWristDeltaDataConfig(),
+    "pipette_right_target_joints": PipetteRightTargetJointsDataConfig(),
+    "pipette_bimanual_wrist_delta": PipetteBimanualWristDeltaDataConfig(),
 }

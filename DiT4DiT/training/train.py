@@ -90,7 +90,7 @@ def build_model(cfg) -> torch.nn.Module:
 from DiT4DiT.dataloader import build_dataloader
 
 
-def prepare_data(cfg, accelerator, output_dir) -> Tuple[DataLoader, DataLoader]:
+def prepare_data(cfg, accelerator, output_dir) -> Tuple[DataLoader, DataLoader | None]:
     """prepare training data"""
     # VLA data loader
     logger.info(f"Creating VLA Dataset with Mixture `{cfg.datasets.vla_data.data_mix}`")
@@ -99,10 +99,24 @@ def prepare_data(cfg, accelerator, output_dir) -> Tuple[DataLoader, DataLoader]:
     logger.info(f"Using action_video_freq_ratio={action_video_freq_ratio}")
     vla_train_dataloader = build_dataloader(cfg=cfg, dataset_py=cfg.datasets.vla_data.dataset_py)
 
+    vla_test_dataloader = None
+    test_data_cfg = getattr(cfg.datasets, "vla_test_data", None)
+    if test_data_cfg is not None:
+        logger.info(f"Creating test VLA Dataset with Mixture `{test_data_cfg.data_mix}`")
+        train_metadata = vla_train_dataloader.dataset.merged_metadata
+        vla_test_dataloader = build_dataloader(
+            cfg=cfg,
+            dataset_py=test_data_cfg.dataset_py,
+            data_cfg=test_data_cfg,
+            mode="test",
+            normalization_metadata=train_metadata,
+            save_statistics=False,
+        )
+
     accelerator.dataloader_config.dispatch_batches = False
     dist.barrier()
 
-    return vla_train_dataloader
+    return vla_train_dataloader, vla_test_dataloader
 
 
 def setup_optimizer_and_scheduler(model, cfg) -> Tuple[torch.optim.Optimizer, torch.optim.lr_scheduler._LRScheduler]:
@@ -135,10 +149,11 @@ def setup_optimizer_and_scheduler(model, cfg) -> Tuple[torch.optim.Optimizer, to
 
 
 class VLATrainer(TrainerUtils):
-    def __init__(self, cfg, model, vla_train_dataloader, optimizer, lr_scheduler, accelerator):
+    def __init__(self, cfg, model, vla_train_dataloader, vla_test_dataloader, optimizer, lr_scheduler, accelerator):
         self.config = cfg
         self.model = model
         self.vla_train_dataloader = vla_train_dataloader
+        self.vla_test_dataloader = vla_test_dataloader
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
         self.accelerator = accelerator
@@ -214,12 +229,13 @@ class VLATrainer(TrainerUtils):
         self.print_trainable_parameters(self.model)
 
         # initialize distributed training components
-        self.model, self.optimizer, self.vla_train_dataloader = self.setup_distributed_training(
-            self.accelerator,  # must be the first param
-            self.model,
-            self.optimizer,
-            self.vla_train_dataloader,
-        )
+        components = [self.model, self.optimizer, self.vla_train_dataloader]
+        if self.vla_test_dataloader is not None:
+            components.append(self.vla_test_dataloader)
+        prepared = self.setup_distributed_training(self.accelerator, *components)
+        self.model, self.optimizer, self.vla_train_dataloader = prepared[:3]
+        if self.vla_test_dataloader is not None:
+            self.vla_test_dataloader = prepared[3]
 
         self._init_wandb()
 
@@ -469,7 +485,7 @@ class VLATrainer(TrainerUtils):
 
         # execute evaluation step
 
-    def eval_action_model(self, step_metrics: dict = None) -> float:
+    def eval_action_model(self, step_metrics: dict = None) -> dict:
         """
         Evaluate the model on the given dataset using the specified metric function.
 
@@ -478,27 +494,45 @@ class VLATrainer(TrainerUtils):
         :return: Average metric score across the evaluation dataset.
         """
 
-        examples = self._get_next_batch()
-        score = 0.0
-        num_samples = len(examples)
-        actions = [example["action"] for example in examples]  # label
-        # Predict actions using the model
-        action_mask = [example["action_mask"] for example in examples] # [B, len, action_dim]
-        output_dict = self.model.predict_action(
-            examples=examples, use_ddim=True, num_ddim_steps=20
-        )
+        if self.vla_test_dataloader is None:
+            return step_metrics
 
-        if self.accelerator.is_main_process:
-            normalized_actions = output_dict["normalized_actions"]  # B, T, D
-            actions = np.array(actions)  # convert actions to numpy.ndarray
-            action_mask = np.array(action_mask)  # convert action_mask to numpy.ndarray [B, T, D]
-            # Apply action_mask: only compute MSE on valid (True) dimensions
-            masked_diff = (normalized_actions - actions) * action_mask
-            mse = (masked_diff ** 2).sum() / action_mask.sum()
-            step_metrics["mse_score"] = mse
+        if step_metrics is None:
+            step_metrics = {}
+        self.model.eval()
+        squared_error = torch.zeros(1, device=self.accelerator.device, dtype=torch.float64)
+        valid_count = torch.zeros(1, device=self.accelerator.device, dtype=torch.float64)
+        max_batches = int(getattr(self.config.trainer, "eval_max_batches", 0) or 0)
+        with torch.inference_mode():
+            for batch_index, examples in enumerate(self.vla_test_dataloader):
+                if max_batches > 0 and batch_index >= max_batches:
+                    break
+                actions = torch.as_tensor(
+                    np.asarray([example["action"] for example in examples]),
+                    device=self.accelerator.device,
+                    dtype=torch.float32,
+                )
+                action_mask = torch.as_tensor(
+                    np.asarray([example["action_mask"] for example in examples]),
+                    device=self.accelerator.device,
+                    dtype=torch.float32,
+                )
+                output_dict = self.model.predict_action(examples=examples)
+                predictions = torch.as_tensor(
+                    output_dict["normalized_actions"],
+                    device=self.accelerator.device,
+                    dtype=torch.float32,
+                )
+                squared_error += (((predictions - actions) * action_mask) ** 2).sum(
+                    dtype=torch.float64
+                )
+                valid_count += action_mask.sum(dtype=torch.float64)
 
-        del examples
-        dist.barrier()  # ensure all processes are synchronized
+        squared_error = self.accelerator.reduce(squared_error, reduction="sum")
+        valid_count = self.accelerator.reduce(valid_count, reduction="sum")
+        step_metrics["test_mse"] = (squared_error / valid_count.clamp_min(1)).item()
+        self.model.train()
+        self.accelerator.wait_for_everyone()
         return step_metrics
 
     def _log_training_config(self):
@@ -629,7 +663,9 @@ def main(cfg) -> None:
     # build model
     vla = build_framework(cfg)
     # prepare data
-    vla_train_dataloader = prepare_data(cfg=cfg, accelerator=accelerator, output_dir=output_dir)
+    vla_train_dataloader, vla_test_dataloader = prepare_data(
+        cfg=cfg, accelerator=accelerator, output_dir=output_dir
+    )
 
     # set optimizer and scheduler
     optimizer, lr_scheduler = setup_optimizer_and_scheduler(model=vla, cfg=cfg)
@@ -640,6 +676,7 @@ def main(cfg) -> None:
         cfg=cfg,
         model=vla,
         vla_train_dataloader=vla_train_dataloader,
+        vla_test_dataloader=vla_test_dataloader,
         optimizer=optimizer,
         lr_scheduler=lr_scheduler,
         accelerator=accelerator,

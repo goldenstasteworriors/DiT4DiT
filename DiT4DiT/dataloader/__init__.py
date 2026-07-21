@@ -32,11 +32,18 @@ def save_dataset_statistics(dataset_statistics, run_dir):
 
 
 
-def build_dataloader(cfg, dataset_py="lerobot_datasets_oxe"):
+def build_dataloader(
+    cfg,
+    dataset_py="lerobot_datasets_oxe",
+    data_cfg=None,
+    mode="train",
+    normalization_metadata=None,
+    save_statistics=True,
+):
 
     if dataset_py == "lerobot_datasets":
         from DiT4DiT.dataloader.lerobot_datasets import get_vla_dataset, collate_fn
-        vla_dataset_cfg = cfg.datasets.vla_data
+        vla_dataset_cfg = data_cfg if data_cfg is not None else cfg.datasets.vla_data
 
         sharing_strategy = getattr(vla_dataset_cfg, "multiprocessing_sharing_strategy", None)
         if sharing_strategy:
@@ -44,7 +51,10 @@ def build_dataloader(cfg, dataset_py="lerobot_datasets_oxe"):
 
             mp.set_sharing_strategy(sharing_strategy)
 
-        vla_dataset = get_vla_dataset(data_cfg=vla_dataset_cfg)
+        vla_dataset = get_vla_dataset(data_cfg=vla_dataset_cfg, mode=mode)
+        if normalization_metadata is not None:
+            for dataset in vla_dataset.datasets:
+                dataset.set_transforms_metadata(normalization_metadata[dataset.tag])
         num_workers = getattr(vla_dataset_cfg, "num_workers", 4)
         dataloader_kwargs = {}
         if num_workers > 0:
@@ -61,7 +71,7 @@ def build_dataloader(cfg, dataset_py="lerobot_datasets_oxe"):
             **dataloader_kwargs,
             # shuffle=True
         )        
-        if dist.get_rank() == 0: 
+        if save_statistics and dist.get_rank() == 0:
             
             output_dir = Path(cfg.output_dir)
             vla_dataset.save_dataset_statistics(output_dir / "dataset_statistics.json")

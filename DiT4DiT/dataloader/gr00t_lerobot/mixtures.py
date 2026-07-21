@@ -18,6 +18,12 @@ DATASET_NAMED_MIXTURES = {
     "pipette_right_wrist_delta": [
         ("pick_up_pipette_right_wrist_delta", 1.0, "pipette_right_wrist_delta"),
     ],
+    "pipette_right_target_joints": [
+        ("pick_up_pipette_right_target_joints", 1.0, "pipette_right_target_joints"),
+    ],
+    "pipette_bimanual_wrist_delta": [
+        ("pick_up_pipette_bimanual_wrist_delta", 1.0, "pipette_bimanual_wrist_delta"),
+    ],
 
     "custom_dataset": [
         ("custom_dataset_name", 1.0, "custom_robot_config"),
