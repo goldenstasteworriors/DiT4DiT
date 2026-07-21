@@ -115,6 +115,43 @@ python g1_joint_client.py ... --arm \
 下发参考 SONICMJ 的 `rt/lowcmd` 低层控制。初始化时双臂同步移动到 episode 0；推理时
 右臂跟随模型，左臂保持 episode 0 姿态。双腿和腰默认使用纯速度阻尼（无位置目标、
 零前馈力矩），因此必须可靠吊挂。
+
+模型接管后，每次模型请求仍保存为 `inference_XXXXXX.npz`，同一会话目录还会生成
+`execution_tracking.csv`。CSV 每个实际消费的模型动作一行，记录推理编号、chunk 内步号、
+在线 IK 目标、限速后下发目标、下发该步之前的 LowState 实测关节角，以及 Inspire 手的
+目标、命令和实测状态。相邻两行的 `measured_arm_*` 可以用来检查上一行命令执行后的跟踪
+情况；跨 chunk 时还包含同步推理期间持续保持上一目标后的最终实测结果。
+
+可以循环播放最新一次部署的在线 IK 结果。`--frequency` 和部署命令保持一致；记录中的
+`joint_action_output` 已经是按局部腕部增量逐步累加并逐步求 IK 的结果，因此默认会严格播放
+该次部署实际选择的 `execution-horizon` 步数：
+
+```bash
+MUJOCO_GL=glfw conda run --no-capture-output -n decoupled_vla_collection \
+  python examples/Real_G1/joint_angle_deploy/render_deployment_session_mujoco.py \
+    --frequency 10 \
+    --pose-source ik-target
+```
+
+新版本部署产生 `execution_tracking.csv` 后，也可以分别循环查看限速后的实际下发目标，或
+每一步下发前的实测机械臂姿态：
+
+```bash
+MUJOCO_GL=glfw conda run --no-capture-output -n decoupled_vla_collection \
+  python examples/Real_G1/joint_angle_deploy/render_deployment_session_mujoco.py \
+    --frequency 10 \
+    --pose-source commanded
+
+MUJOCO_GL=glfw conda run --no-capture-output -n decoupled_vla_collection \
+  python examples/Real_G1/joint_angle_deploy/render_deployment_session_mujoco.py \
+    --frequency 10 \
+    --pose-source measured
+```
+
+默认选择 `inference_records/deployment_model_io` 下最新的会话并循环播放。也可以使用
+`--session <会话目录>` 指定一次部署；`--no-loop` 表示播放一次后保持末态。旧会话没有
+`execution_tracking.csv`，只能使用 `--pose-source ik-target`。
+
 只有在确认机器人完全由吊架承重后，才可显式使用 `--lower-body-mode zero-torque`。
 安全逻辑包括：键盘
 急停锁存、Ctrl-C、低状态 200 ms 看门狗、推理 15 s 超时（包含首次 CUDA warm-up）、

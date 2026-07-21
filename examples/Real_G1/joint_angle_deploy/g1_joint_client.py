@@ -9,6 +9,7 @@ latches an e-stop which holds the latest measured right-arm pose.
 from __future__ import annotations
 
 import argparse
+import csv
 import os
 import select
 import signal
@@ -283,6 +284,8 @@ class ModelIORecorder:
         self.action_space = action_space
         self.session_dir = None
         self.step = 0
+        self._tracking_file = None
+        self._tracking_writer = None
 
     def _ensure_session(self) -> Path:
         if self.session_dir is None:
@@ -321,6 +324,62 @@ class ModelIORecorder:
             conversion_error=np.asarray(conversion_error),
         )
         self.step += 1
+
+    def record_execution(
+        self,
+        inference_index: int,
+        action_index: int,
+        desired_arm: np.ndarray,
+        commanded_arm: np.ndarray,
+        measured_arm: np.ndarray,
+        desired_hand: np.ndarray,
+        commanded_hand: np.ndarray,
+        measured_hand: np.ndarray,
+    ) -> None:
+        """Append one row per consumed model action for target/tracking diagnosis."""
+        if self.root is None:
+            return
+        if self._tracking_writer is None:
+            path = self._ensure_session() / "execution_tracking.csv"
+            self._tracking_file = path.open("w", newline="", encoding="utf-8")
+            fields = ["wall_time_unix", "monotonic_time", "inference_index", "action_index"]
+            for prefix, width in (
+                ("desired_arm", 7),
+                ("commanded_arm", 7),
+                ("measured_arm", 7),
+                ("desired_hand", 6),
+                ("commanded_hand", 6),
+                ("measured_hand", 6),
+            ):
+                fields.extend(f"{prefix}_{index}" for index in range(width))
+            self._tracking_writer = csv.DictWriter(self._tracking_file, fieldnames=fields)
+            self._tracking_writer.writeheader()
+            print(f"[RECORD] 控制跟踪保存到 {path}")
+        row = {
+            "wall_time_unix": f"{time.time():.9f}",
+            "monotonic_time": f"{time.monotonic():.9f}",
+            "inference_index": inference_index,
+            "action_index": action_index,
+        }
+        for prefix, values in (
+            ("desired_arm", desired_arm),
+            ("commanded_arm", commanded_arm),
+            ("measured_arm", measured_arm),
+            ("desired_hand", desired_hand),
+            ("commanded_hand", commanded_hand),
+            ("measured_hand", measured_hand),
+        ):
+            row.update(
+                {f"{prefix}_{index}": f"{float(value):.9f}" for index, value in enumerate(values)}
+            )
+        self._tracking_writer.writerow(row)
+        self._tracking_file.flush()
+
+    def close(self) -> None:
+        if self._tracking_file is not None:
+            self._tracking_file.close()
+            self._tracking_file = None
+            self._tracking_writer = None
 
 
 class _QuietCameraFrameCounter(int):
@@ -1078,6 +1137,8 @@ def main():
     left_init_correction = np.zeros(7, dtype=np.float64)
     right_init_correction = np.zeros(7, dtype=np.float64)
     cache = np.empty((0, 13))
+    cache_inference_index = -1
+    cache_action_index = 0
     previous_wrist_pose = None
     right_hand_command = initial_hand_command.copy()
     left_hand_command = initial_hand_command.copy()
@@ -1290,6 +1351,8 @@ def main():
                         )
                         raise
                     recorder.record(image, model_state, args.instruction, predicted, cache)
+                cache_inference_index = recorder.step - 1
+                cache_action_index = 0
             if current_wrist_pose is not None:
                 previous_wrist_pose = (
                     current_wrist_pose[0].copy(),
@@ -1304,6 +1367,17 @@ def main():
             target = arm_q + np.clip(desired_arm - arm_q, -max_step, max_step)
             hand_max_step = args.max_hand_speed * period
             right_hand_command += np.clip(desired_hand - right_hand_command, -hand_max_step, hand_max_step)
+            recorder.record_execution(
+                cache_inference_index,
+                cache_action_index,
+                desired_arm,
+                target,
+                arm_q,
+                desired_hand,
+                right_hand_command,
+                right_hand_measured,
+            )
+            cache_action_index += 1
             if enabled:
                 robot.send_right_arm(target, measured)
                 robot.send_inspire_hands(right_hand_command, left_hand_command)
@@ -1313,6 +1387,7 @@ def main():
     except Exception as exc:
         estop.trigger(str(exc))
     finally:
+        recorder.close()
         try:
             if enabled:
                 state_is_stale = "lowstate missing or stale" in estop.reason.lower()
