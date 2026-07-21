@@ -9,6 +9,7 @@ latches an e-stop which holds the latest measured right-arm pose.
 from __future__ import annotations
 
 import argparse
+import os
 import select
 import signal
 import socket
@@ -188,6 +189,54 @@ class PolicyClient:
         if not response.get("ok"):
             raise RuntimeError(str(response.get("error")))
         return np.asarray(response["data"]["unnormalized_actions"], dtype=np.float64)
+
+
+class ModelIORecorder:
+    """Persist exactly one record for each policy request, not each control tick."""
+
+    def __init__(self, root: Path | None, action_space: str):
+        self.root = root
+        self.action_space = action_space
+        self.session_dir = None
+        self.step = 0
+
+    def _ensure_session(self) -> Path:
+        if self.session_dir is None:
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            self.session_dir = self.root.expanduser().resolve() / f"{timestamp}_{os.getpid()}"
+            self.session_dir.mkdir(parents=True, exist_ok=False)
+            print(f"[RECORD] 模型输入输出保存到 {self.session_dir}")
+        return self.session_dir
+
+    def record(
+        self,
+        image: np.ndarray,
+        state: np.ndarray,
+        instruction: str,
+        raw_output: np.ndarray,
+        joint_output: np.ndarray | None,
+        conversion_error: str = "",
+    ) -> None:
+        if self.root is None:
+            return
+        path = self._ensure_session() / f"inference_{self.step:06d}.npz"
+        np.savez_compressed(
+            path,
+            inference_index=np.int64(self.step),
+            wall_time_unix=np.float64(time.time()),
+            action_space=np.asarray(self.action_space),
+            instruction=np.asarray(instruction),
+            input_image_rgb=np.array(image, copy=True),
+            input_state=np.array(state, copy=True),
+            raw_model_output=np.array(raw_output, copy=True),
+            joint_action_output=(
+                np.empty((0, 13), dtype=np.float64)
+                if joint_output is None
+                else np.array(joint_output, copy=True)
+            ),
+            conversion_error=np.asarray(conversion_error),
+        )
+        self.step += 1
 
 
 class _QuietCameraFrameCounter(int):
@@ -770,6 +819,17 @@ def main():
         default=15000,
         help="ZMQ send/receive timeout; includes first-inference CUDA warm-up",
     )
+    parser.add_argument(
+        "--record-dir",
+        type=Path,
+        default=PROJECT_ROOT / "inference_records/deployment_model_io",
+        help="one NPZ per model request; relative paths are resolved from the current directory",
+    )
+    parser.add_argument(
+        "--no-record-model-io",
+        action="store_true",
+        help="disable recording model inputs and outputs",
+    )
     parser.add_argument("--arm", action="store_true", help="actually publish rt/lowcmd")
     args = parser.parse_args()
     if not sys.stdin.isatty():
@@ -805,6 +865,10 @@ def main():
         )
 
     policy = PolicyClient(args.server, args.port, args.timeout_ms)
+    recorder = ModelIORecorder(
+        None if args.no_record_model_io else args.record_dir,
+        args.action_space,
+    )
     camera = CameraStream(
         args.camera,
         args.view_camera,
@@ -1061,21 +1125,34 @@ def main():
                     if predicted.ndim != 2 or predicted.shape[1] != 13 or not np.isfinite(predicted).all():
                         raise RuntimeError(f"invalid joint policy output {predicted.shape}")
                     cache = predicted[: args.execution_horizon]
+                    recorder.record(image, model_state, args.instruction, predicted, cache)
                 else:
                     pelvis_position, pelvis_rotation = pelvis_pose
-                    cache = _wrist_actions_to_joint_actions(
-                        predicted,
-                        wrist_ik,
-                        current_position,
-                        current_rotation,
-                        pelvis_position,
-                        pelvis_rotation,
-                        args.execution_horizon,
-                        args.max_wrist_delta_position,
-                        args.max_wrist_delta_orientation,
-                        args.max_ik_position_residual,
-                        args.max_ik_orientation_residual,
-                    )
+                    try:
+                        cache = _wrist_actions_to_joint_actions(
+                            predicted,
+                            wrist_ik,
+                            current_position,
+                            current_rotation,
+                            pelvis_position,
+                            pelvis_rotation,
+                            args.execution_horizon,
+                            args.max_wrist_delta_position,
+                            args.max_wrist_delta_orientation,
+                            args.max_ik_position_residual,
+                            args.max_ik_orientation_residual,
+                        )
+                    except Exception as exc:
+                        recorder.record(
+                            image,
+                            model_state,
+                            args.instruction,
+                            predicted,
+                            None,
+                            str(exc),
+                        )
+                        raise
+                    recorder.record(image, model_state, args.instruction, predicted, cache)
             if current_wrist_pose is not None:
                 previous_wrist_pose = (
                     current_wrist_pose[0].copy(),
