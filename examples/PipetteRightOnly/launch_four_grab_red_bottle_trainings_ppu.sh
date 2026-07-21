@@ -14,6 +14,7 @@ WRIST_GPUS=${WRIST_GPUS:-4,5,6,7}
 TARGET_JOINT_GPUS=${TARGET_JOINT_GPUS:-8,9,10,11}
 BIMANUAL_GPUS=${BIMANUAL_GPUS:-12,13,14,15}
 RUN_FILTER=${RUN_FILTER:-all}
+NUM_PROCESSES=${NUM_PROCESSES:-4}
 
 if [[ ! -x "${PYTHON}" ]]; then
   echo "Project environment is unavailable: ${PYTHON}" >&2
@@ -76,7 +77,7 @@ start_run() {
   fi
   CUDA_VISIBLE_DEVICES="${devices}" nohup "${PYTHON}" -m accelerate.commands.launch \
     --config_file "${ACCELERATE_CONFIG}" \
-    --num_machines 1 --num_processes 4 --main_process_port "${port}" \
+    --num_machines 1 --num_processes "${NUM_PROCESSES}" --main_process_port "${port}" \
     DiT4DiT/training/train.py \
     --config_yaml "${TRAIN_CONFIG}" \
     --run_id "${run_id}" \
@@ -96,7 +97,7 @@ start_run() {
     --datasets.vla_test_data.max_action_dim "${dimension}" \
     >"${run_dir}/train.log" 2>&1 &
   echo $! >"${run_dir}/launcher.pid"
-  echo "${run_id}: devices=${devices}, pid=$(<"${run_dir}/launcher.pid")"
+  echo "${run_id}: devices=${devices}, processes=${NUM_PROCESSES}, pid=$(<"${run_dir}/launcher.pid")"
 }
 
 should_start() {
