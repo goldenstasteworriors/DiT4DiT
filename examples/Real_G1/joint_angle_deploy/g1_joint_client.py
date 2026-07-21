@@ -25,6 +25,11 @@ import msgpack
 import numpy as np
 import zmq
 
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+if str(PROJECT_ROOT) not in sys.path:
+    # Running this file directly otherwise exposes only joint_angle_deploy/.
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 RIGHT_ARM_MOTORS = np.arange(22, 29)
 LEFT_ARM_MOTORS = np.arange(15, 22)
 LOWER_BODY_MOTORS = np.arange(0, 15)
@@ -604,7 +609,7 @@ def main():
     parser.add_argument(
         "--ik-model",
         type=Path,
-        default=Path(__file__).resolve().parents[3]
+        default=PROJECT_ROOT
         / "decoupled_wbc/gr00t_wbc/control/robot_model/model_data/g1/g1_29dof_with_hand.xml",
     )
     parser.add_argument("--ik-max-iterations", type=int, default=80)
