@@ -1,4 +1,4 @@
-"""Run the right-arm joint-angle DiT4DiT policy on a real Unitree G1.
+"""Run a right-arm joint-angle or wrist-delta DiT4DiT policy on a real Unitree G1.
 
 The model runs on a remote ZMQ server.  This process must run on the computer
 connected to the G1 DDS network.  Publishing is disabled unless --arm is set.
@@ -17,6 +17,8 @@ import termios
 import threading
 import time
 import tty
+from pathlib import Path
+from types import SimpleNamespace
 
 import cv2
 import msgpack
@@ -46,6 +48,85 @@ DEFAULT_INITIAL_RIGHT_ARM = np.array(
 DEFAULT_INITIAL_LEFT_HAND_STATE = np.array([0.99900001, 0.99800003, 0.99800003, 0.99800003, 0.99900001, 0.98299998])
 DEFAULT_INITIAL_RIGHT_HAND_STATE = np.array([0.99800003, 1.0, 0.99800003, 0.99800003, 0.99900001, 0.98400003])
 DEFAULT_INITIAL_HAND_COMMAND = np.ones(6, dtype=np.float64)
+
+
+def _relative_wrist_state(
+    previous_position: np.ndarray,
+    previous_rotation: np.ndarray,
+    current_position: np.ndarray,
+    current_rotation: np.ndarray,
+    right_hand: np.ndarray,
+) -> np.ndarray:
+    """Build the exact 16-D (15 values + padding) state used in wrist-delta training."""
+    relative_position = previous_rotation.T @ (current_position - previous_position)
+    relative_rotation = previous_rotation.T @ current_rotation
+    state = np.concatenate(
+        [relative_position, relative_rotation[:2].reshape(6), right_hand], axis=0
+    ).astype(np.float32)
+    return np.pad(state, (0, 1))
+
+
+def _wrist_actions_to_joint_actions(
+    predicted: np.ndarray,
+    ik,
+    start_position: np.ndarray,
+    start_rotation: np.ndarray,
+    pelvis_position: np.ndarray,
+    pelvis_rotation: np.ndarray,
+    execution_horizon: int,
+    max_delta_position: float,
+    max_delta_orientation: float,
+    max_ik_position_residual: float,
+    max_ik_orientation_residual: float,
+) -> np.ndarray:
+    """Integrate local SE(3) deltas and solve the corresponding right-arm joint targets."""
+    from examples.PipetteRightOnly.convert_wrist_delta_to_joint_chunks import (
+        rotation_6d_to_matrix,
+        rotation_error,
+    )
+
+    if predicted.ndim != 2 or predicted.shape[1] != 15 or not np.isfinite(predicted).all():
+        raise RuntimeError(f"invalid wrist-delta policy output {predicted.shape}")
+    horizon = min(execution_horizon, len(predicted))
+    if horizon <= 0:
+        raise RuntimeError("wrist-delta policy returned an empty action chunk")
+    converted = np.empty((horizon, 13), dtype=np.float64)
+    position = start_position.copy()
+    rotation = start_rotation.copy()
+    for index, wrist_action in enumerate(predicted[:horizon]):
+        delta_position = wrist_action[:3]
+        delta_rotation = rotation_6d_to_matrix(wrist_action[3:9])
+        position_norm = float(np.linalg.norm(delta_position))
+        orientation_norm = float(np.linalg.norm(rotation_error(delta_rotation, np.eye(3))))
+        if position_norm > max_delta_position:
+            raise RuntimeError(
+                f"wrist delta position {position_norm:.4f}m exceeds {max_delta_position:.4f}m"
+            )
+        if orientation_norm > max_delta_orientation:
+            raise RuntimeError(
+                f"wrist delta orientation {orientation_norm:.4f}rad exceeds "
+                f"{max_delta_orientation:.4f}rad"
+            )
+        position = position + rotation @ delta_position
+        rotation = rotation @ delta_rotation
+        target_position = pelvis_position + pelvis_rotation @ position
+        target_rotation = pelvis_rotation @ rotation
+        joints, position_residual, orientation_residual, _ = ik.solve(
+            target_position, target_rotation
+        )
+        if position_residual > max_ik_position_residual:
+            raise RuntimeError(
+                f"IK position residual {position_residual:.5f}m exceeds "
+                f"{max_ik_position_residual:.5f}m"
+            )
+        if orientation_residual > max_ik_orientation_residual:
+            raise RuntimeError(
+                f"IK orientation residual {orientation_residual:.5f}rad exceeds "
+                f"{max_ik_orientation_residual:.5f}rad"
+            )
+        converted[index, :7] = joints
+        converted[index, 7:13] = wrist_action[9:15]
+    return converted
 
 
 def _pack_array(obj):
@@ -514,6 +595,27 @@ def main():
         help="show the selected robot/local camera after initialization reaches READY",
     )
     parser.add_argument("--instruction", default="pick up the pipette")
+    parser.add_argument(
+        "--action-space",
+        choices=("joint", "wrist-delta"),
+        default="joint",
+        help="checkpoint action representation; wrist-delta runs online MuJoCo FK/IK",
+    )
+    parser.add_argument(
+        "--ik-model",
+        type=Path,
+        default=Path(__file__).resolve().parents[3]
+        / "decoupled_wbc/gr00t_wbc/control/robot_model/model_data/g1/g1_29dof_with_hand.xml",
+    )
+    parser.add_argument("--ik-max-iterations", type=int, default=80)
+    parser.add_argument("--ik-damping", type=float, default=1e-4)
+    parser.add_argument("--ik-max-step", type=float, default=0.2, help="maximum IK iteration step in rad")
+    parser.add_argument("--ik-position-tolerance", type=float, default=2e-5)
+    parser.add_argument("--ik-orientation-tolerance", type=float, default=2e-4)
+    parser.add_argument("--max-wrist-delta-position", type=float, default=0.03, help="per predicted step, metres")
+    parser.add_argument("--max-wrist-delta-orientation", type=float, default=0.35, help="per predicted step, radians")
+    parser.add_argument("--max-ik-position-residual", type=float, default=0.01, help="metres")
+    parser.add_argument("--max-ik-orientation-residual", type=float, default=0.1, help="radians")
     parser.add_argument("--frequency", type=float, default=10.0)
     parser.add_argument("--execution-horizon", type=int, default=4)
     parser.add_argument("--max-speed", type=float, default=0.25, help="rad/s")
@@ -603,6 +705,18 @@ def main():
         raise SystemExit("必须在交互终端运行，确保键盘急停可用")
     if args.camera_stale_warning <= 0.0 or args.camera_stale_log_interval <= 0.0:
         raise SystemExit("camera stale warning/log intervals must be positive")
+    if min(
+        args.ik_max_iterations,
+        args.ik_damping,
+        args.ik_max_step,
+        args.ik_position_tolerance,
+        args.ik_orientation_tolerance,
+        args.max_wrist_delta_position,
+        args.max_wrist_delta_orientation,
+        args.max_ik_position_residual,
+        args.max_ik_orientation_residual,
+    ) <= 0:
+        raise SystemExit("IK and wrist-delta safety parameters must be positive")
 
     robot = G1DDS(args.network_interface, args.lower_body_mode)
     policy = PolicyClient(args.server, args.port, args.timeout_ms)
@@ -615,6 +729,19 @@ def main():
         args.camera_stale_warning,
         args.camera_stale_log_interval,
     )
+    wrist_ik = None
+    if args.action_space == "wrist-delta":
+        from examples.PipetteRightOnly.convert_wrist_delta_to_joint_chunks import RightArmIK
+
+        ik_args = SimpleNamespace(
+            max_iterations=args.ik_max_iterations,
+            damping=args.ik_damping,
+            max_step=args.ik_max_step,
+            position_tolerance=args.ik_position_tolerance,
+            orientation_tolerance=args.ik_orientation_tolerance,
+        )
+        wrist_ik = RightArmIK(args.ik_model.expanduser().resolve(), ik_args)
+        print(f"[IK] wrist-delta 在线 FK/IK 已启用，模型: {args.ik_model}")
     estop, period = EStop(), 1.0 / args.frequency
     signal.signal(signal.SIGINT, lambda *_: estop.trigger("Ctrl-C"))
     old_tty = termios.tcgetattr(sys.stdin)
@@ -667,6 +794,7 @@ def main():
     left_init_correction = np.zeros(7, dtype=np.float64)
     right_init_correction = np.zeros(7, dtype=np.float64)
     cache = np.empty((0, 13))
+    previous_wrist_pose = None
     right_hand_command = initial_hand_command.copy()
     left_hand_command = initial_hand_command.copy()
     try:
@@ -688,7 +816,8 @@ def main():
                 phase = "INFERENCE"
                 camera.set_phase(phase)
                 cache = np.empty((0, 13))
-                print("[INFERENCE] 模型已接管右臂")
+                previous_wrist_pose = None
+                print(f"[INFERENCE] 模型已接管右臂，action-space={args.action_space}")
             measured = robot.state(0.2)
             left_arm_q = measured[LEFT_ARM_MOTORS]
             arm_q = measured[RIGHT_ARM_MOTORS]
@@ -819,13 +948,54 @@ def main():
                 time.sleep(max(0.0, period - (time.monotonic() - start)))
                 continue
             frame = camera.frame()
+            current_wrist_pose = None
+            pelvis_pose = None
+            if wrist_ik is not None:
+                wrist_ik.set_source_state(measured[:29])
+                current_wrist_pose = wrist_ik.wrist_pose_in_pelvis()
+                pelvis_pose = wrist_ik.pelvis_pose()
             if len(cache) == 0:
                 image = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), (224, 224))
-                model_state = np.concatenate((arm_q, right_hand_measured))
+                if wrist_ik is None:
+                    model_state = np.concatenate((arm_q, right_hand_measured))
+                else:
+                    current_position, current_rotation = current_wrist_pose
+                    if previous_wrist_pose is None:
+                        previous_position, previous_rotation = current_position, current_rotation
+                    else:
+                        previous_position, previous_rotation = previous_wrist_pose
+                    model_state = _relative_wrist_state(
+                        previous_position,
+                        previous_rotation,
+                        current_position,
+                        current_rotation,
+                        right_hand_measured,
+                    )
                 predicted = policy.predict(image, model_state, args.instruction)
-                if predicted.ndim != 2 or predicted.shape[1] != 13 or not np.isfinite(predicted).all():
-                    raise RuntimeError(f"invalid policy output {predicted.shape}")
-                cache = predicted[: args.execution_horizon]
+                if wrist_ik is None:
+                    if predicted.ndim != 2 or predicted.shape[1] != 13 or not np.isfinite(predicted).all():
+                        raise RuntimeError(f"invalid joint policy output {predicted.shape}")
+                    cache = predicted[: args.execution_horizon]
+                else:
+                    pelvis_position, pelvis_rotation = pelvis_pose
+                    cache = _wrist_actions_to_joint_actions(
+                        predicted,
+                        wrist_ik,
+                        current_position,
+                        current_rotation,
+                        pelvis_position,
+                        pelvis_rotation,
+                        args.execution_horizon,
+                        args.max_wrist_delta_position,
+                        args.max_wrist_delta_orientation,
+                        args.max_ik_position_residual,
+                        args.max_ik_orientation_residual,
+                    )
+            if current_wrist_pose is not None:
+                previous_wrist_pose = (
+                    current_wrist_pose[0].copy(),
+                    current_wrist_pose[1].copy(),
+                )
             desired_arm, desired_hand, cache = cache[0, :7], cache[0, 7:13], cache[1:]
             if np.any(desired_arm < RIGHT_ARM_LOWER) or np.any(desired_arm > RIGHT_ARM_UPPER):
                 raise RuntimeError("policy target exceeds URDF joint limits")

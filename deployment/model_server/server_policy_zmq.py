@@ -16,23 +16,25 @@ from DiT4DiT.model.framework.share_tools import read_mode_config
 class UnnormalizedPolicyWrapper:
     """Wraps a policy to add action unnormalization as a post-processing step."""
 
-    def __init__(self, policy, action_norm_stats, state_norm_stats):
+    def __init__(self, policy, action_norm_stats, state_norm_stats, state_normalization="q99"):
         self.policy = policy
         self.action_norm_stats = action_norm_stats
         self.state_norm_stats = state_norm_stats
+        self.state_normalization = state_normalization
 
     def normalize_state(self, state, max_state_dim=None):
         """Apply the q01/q99 transform used by the real-G1 data pipeline."""
         state = np.asarray(state, dtype=np.float32)
-        q01 = np.asarray(self.state_norm_stats["q01"], dtype=np.float32)
-        q99 = np.asarray(self.state_norm_stats["q99"], dtype=np.float32)
-        if state.shape[-1] != q01.size:
-            raise ValueError(f"state has {state.shape[-1]} values, checkpoint expects {q01.size}")
-        scale = q99 - q01
-        mask = np.abs(scale) > 1e-8
-        normalized = state.copy()
-        normalized[..., mask] = 2.0 * (state[..., mask] - q01[mask]) / scale[mask] - 1.0
-        state = np.clip(normalized, -1.0, 1.0)
+        if self.state_normalization == "q99":
+            q01 = np.asarray(self.state_norm_stats["q01"], dtype=np.float32)
+            q99 = np.asarray(self.state_norm_stats["q99"], dtype=np.float32)
+            if state.shape[-1] != q01.size:
+                raise ValueError(f"state has {state.shape[-1]} values, checkpoint expects {q01.size}")
+            scale = q99 - q01
+            mask = np.abs(scale) > 1e-8
+            normalized = state.copy()
+            normalized[..., mask] = 2.0 * (state[..., mask] - q01[mask]) / scale[mask] - 1.0
+            state = np.clip(normalized, -1.0, 1.0)
 
         if max_state_dim is None:
             max_state_dim = int(self.policy.action_model.state_encoder.layer1.in_features)
@@ -83,7 +85,12 @@ def main(args) -> None:
     logging.info(f"Loaded action norm stats (unnorm_key={unnorm_key})")
 
     # Wrap policy with unnormalization
-    wrapped_policy = UnnormalizedPolicyWrapper(vla, action_norm_stats, state_norm_stats)
+    wrapped_policy = UnnormalizedPolicyWrapper(
+        vla,
+        action_norm_stats,
+        state_norm_stats,
+        state_normalization=args.state_normalization,
+    )
 
     # Get hostname info
     hostname = socket.gethostname()
@@ -135,6 +142,12 @@ def build_argparser():
         type=str,
         default=None,
         help="Dataset key for action unnormalization stats. Auto-detected if only one dataset in statistics.",
+    )
+    parser.add_argument(
+        "--state-normalization",
+        choices=("q99", "none"),
+        default="q99",
+        help="Use none for wrist-delta checkpoints, whose training transform keeps state unnormalized.",
     )
     return parser
 
