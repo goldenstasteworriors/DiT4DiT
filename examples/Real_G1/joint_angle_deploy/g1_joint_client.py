@@ -378,6 +378,7 @@ class G1DDS:
         self._q = None
         self._mode_machine = 0
         self._stamp = 0.0
+        self._last_lowstate_warning_time = 0.0
         self._hand_q = None
         self._hand_stamp = 0.0
         self._lock = threading.Lock()
@@ -429,11 +430,35 @@ class G1DDS:
             "check G1 power/mode, DDS domain, and robot network interface"
         )
 
-    def state(self, max_age: float) -> np.ndarray:
+    def state(
+        self,
+        max_age: float,
+        warning_age: float | None = None,
+        warning_interval: float = 2.0,
+    ) -> np.ndarray:
+        now = time.monotonic()
         with self._lock:
-            if self._q is None or time.monotonic() - self._stamp > max_age:
-                raise RuntimeError("lowstate missing or stale")
-            return self._q.copy()
+            if self._q is None:
+                raise RuntimeError("lowstate missing or stale: no message received")
+            age = now - self._stamp
+            state = self._q.copy()
+        if age > max_age:
+            raise RuntimeError(
+                f"lowstate missing or stale: age={age * 1000.0:.1f}ms, "
+                f"timeout={max_age * 1000.0:.1f}ms"
+            )
+        if (
+            warning_age is not None
+            and age > warning_age
+            and now - self._last_lowstate_warning_time >= warning_interval
+        ):
+            print(
+                f"[LOWSTATE WARNING] 最新状态已过去 {age * 1000.0:.1f}ms；"
+                f"达到 {max_age * 1000.0:.1f}ms 才触发急停",
+                flush=True,
+            )
+            self._last_lowstate_warning_time = now
+        return state
 
     def hand_state(self, max_age: float) -> tuple[np.ndarray, np.ndarray]:
         """Return measured right/left Inspire state from the DDS-Modbus bridge."""
@@ -643,6 +668,24 @@ def main():
     parser.add_argument("--max-speed", type=float, default=0.25, help="rad/s")
     parser.add_argument("--max-hand-speed", type=float, default=0.5, help="normalized Inspire units/s")
     parser.add_argument(
+        "--lowstate-warning-age",
+        type=float,
+        default=0.2,
+        help="warn when no new LowState has arrived for this many seconds",
+    )
+    parser.add_argument(
+        "--lowstate-timeout",
+        type=float,
+        default=0.5,
+        help="latch e-stop after this continuous LowState outage in seconds",
+    )
+    parser.add_argument(
+        "--lowstate-warning-interval",
+        type=float,
+        default=2.0,
+        help="minimum interval between delayed-LowState warnings",
+    )
+    parser.add_argument(
         "--estop-damping-duration",
         type=float,
         default=10.0,
@@ -735,6 +778,10 @@ def main():
         raise SystemExit("camera stale warning/log intervals must be positive")
     if args.estop_damping_duration <= 0.0:
         raise SystemExit("estop-damping-duration must be positive")
+    if min(args.lowstate_warning_age, args.lowstate_timeout, args.lowstate_warning_interval) <= 0.0:
+        raise SystemExit("LowState watchdog parameters must be positive")
+    if args.lowstate_warning_age >= args.lowstate_timeout:
+        raise SystemExit("lowstate-warning-age must be smaller than lowstate-timeout")
     if min(
         args.ik_max_iterations,
         args.ik_damping,
@@ -749,6 +796,14 @@ def main():
         raise SystemExit("IK and wrist-delta safety parameters must be positive")
 
     robot = G1DDS(args.network_interface, args.lower_body_mode)
+
+    def read_robot_state() -> np.ndarray:
+        return robot.state(
+            args.lowstate_timeout,
+            warning_age=args.lowstate_warning_age,
+            warning_interval=args.lowstate_warning_interval,
+        )
+
     policy = PolicyClient(args.server, args.port, args.timeout_ms)
     camera = CameraStream(
         args.camera,
@@ -835,7 +890,7 @@ def main():
                 estop.trigger("keyboard")
                 break
             if key in ("\n", "\r") and args.arm and phase == "DISARMED":
-                measured = robot.state(0.2)
+                measured = read_robot_state()
                 init_start_right_hand, init_start_left_hand = robot.hand_state(0.5)
                 robot.enter_low_level(measured)
                 enabled = True
@@ -848,7 +903,7 @@ def main():
                 cache = np.empty((0, 13))
                 previous_wrist_pose = None
                 print(f"[INFERENCE] 模型已接管右臂，action-space={args.action_space}")
-            measured = robot.state(0.2)
+            measured = read_robot_state()
             left_arm_q = measured[LEFT_ARM_MOTORS]
             arm_q = measured[RIGHT_ARM_MOTORS]
             if phase not in ("DISARMED", "DRY_RUN"):
@@ -1050,7 +1105,7 @@ def main():
                 measured = None
                 if not state_is_stale:
                     try:
-                        measured = robot.state(0.2)
+                        measured = read_robot_state()
                     except RuntimeError:
                         state_is_stale = True
                 if state_is_stale:
