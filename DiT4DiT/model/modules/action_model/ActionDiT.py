@@ -323,7 +323,10 @@ class FlowmatchingActionHead(nn.Module):
         batch_size = vl_embs.shape[0]
         device = vl_embs.device
         actions = torch.randn( # yes, here make sure action_horizon align with data loader? or share from clinet?
-            size=(batch_size, self.config.action_horizon, self.config.action_dim),
+            # Older/resolved training configs only persist
+            # future_action_window_size. __init__ already derives the actual
+            # chunk length from it, so inference must use that compatible value.
+            size=(batch_size, self.action_horizon, self.config.action_dim),
             dtype=vl_embs.dtype,
             device=device,
         )
