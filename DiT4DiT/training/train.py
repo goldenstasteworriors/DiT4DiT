@@ -684,6 +684,23 @@ def main(cfg) -> None:
 
     # execute training preparation
     trainer.prepare_training()
+    if bool(getattr(cfg.trainer, "eval_only", False)):
+        eval_step = int(getattr(cfg.trainer, "eval_step", trainer.completed_steps) or 0)
+        eval_metrics = trainer.eval_action_model({})
+        if accelerator.is_main_process:
+            evaluation_result = {
+                "step": eval_step,
+                "checkpoint": getattr(cfg.trainer, "pretrained_checkpoint", None),
+                **eval_metrics,
+            }
+            evaluation_path = Path(cfg.output_dir) / "evaluation_metrics.json"
+            evaluation_path.write_text(json.dumps(evaluation_result, indent=2) + "\n")
+            wandb.log(eval_metrics, step=eval_step)
+            logger.info(f"Evaluation result saved to {evaluation_path}: {evaluation_result}")
+            wandb.finish()
+        accelerator.wait_for_everyone()
+        dist.destroy_process_group()
+        return
     # execute training
     trainer.train()
 
