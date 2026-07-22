@@ -673,9 +673,11 @@ class G1DDS:
             self._tau_est = np.array(
                 [motor.tau_est for motor in msg.motor_state[:29]], dtype=np.float64
             )
-            self._motor_temperature = np.array(
-                [motor.temperature for motor in msg.motor_state[:29]], dtype=np.float64
-            )
+            temperatures = np.full((29, 2), np.nan, dtype=np.float64)
+            for index, motor in enumerate(msg.motor_state[:29]):
+                values = np.asarray(motor.temperature, dtype=np.float64).reshape(-1)
+                temperatures[index, : min(2, values.size)] = values[:2]
+            self._motor_temperature = temperatures.reshape(-1)
             self._mode_machine = int(msg.mode_machine)
             self._stamp = time.monotonic()
 
@@ -746,7 +748,7 @@ class G1DDS:
                 f"timeout={max_age * 1000.0:.1f}ms"
             )
         arrays = (q, dq, tau_est, temperature)
-        if any(array.shape != (29,) for array in arrays):
+        if any(array.shape != (29,) for array in arrays[:3]) or temperature.shape != (58,):
             raise RuntimeError("LowState contains incomplete motor arrays")
         invalid_q = np.flatnonzero(~np.isfinite(q))
         invalid_arm_dq = ARM_MOTORS[np.flatnonzero(~np.isfinite(dq[ARM_MOTORS]))]

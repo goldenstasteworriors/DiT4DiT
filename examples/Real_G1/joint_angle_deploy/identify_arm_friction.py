@@ -134,8 +134,13 @@ def _csv_header() -> list[str]:
         "torque_measurement_valid",
         "selected_q_cmd", "selected_dq_cmd",
     ]
-    for prefix in ("q", "dq", "tau_est", "temperature"):
+    for prefix in ("q", "dq", "tau_est"):
         header.extend(f"{prefix}_{index}" for index in range(29))
+    header.extend(
+        f"temperature_{motor_index}_{sensor_index}"
+        for motor_index in range(29)
+        for sensor_index in range(2)
+    )
     for prefix in ("arm_q_cmd", "arm_dq_cmd", "arm_tau_gravity", "arm_kp", "arm_kd"):
         header.extend(f"{prefix}_{index}" for index in range(14))
     return header
