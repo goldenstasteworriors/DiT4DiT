@@ -585,6 +585,8 @@ class G1DDS:
         self._command_lock = threading.Lock()
         self._low_level_enabled = False
         self._emergency_damping = False
+        self._gravity_only = False
+        self._gravity_only_kd = 1.5
         self._left_arm_target = None
         self._right_arm_target = None
         self._gravity = (
@@ -731,6 +733,24 @@ class G1DDS:
         with self._command_lock:
             self._emergency_damping = True
 
+    def enter_gravity_only(self, arm_damping: float = 1.5):
+        """Disable arm position control and compensate gravity at measured joint angles."""
+        if not self._low_level_enabled:
+            raise RuntimeError("low-level control is not enabled")
+        if self._gravity is None:
+            raise RuntimeError("gravity compensation is disabled")
+        if not np.isfinite(arm_damping) or arm_damping < 0.0:
+            raise ValueError("arm damping must be a finite non-negative value")
+        with self._command_lock:
+            if self._emergency_damping:
+                raise RuntimeError("gravity-only mode rejected after emergency damping was latched")
+            self._gravity_only_kd = float(arm_damping)
+            self._gravity_only = True
+        print(
+            "[GRAVITY ONLY] 双臂位置增益 Kp=0，"
+            f"阻尼 Kd={self._gravity_only_kd:.3f}，按实测关节角计算重力前馈"
+        )
+
     def _publish_loop(self):
         """Keep rt/lowcmd alive at 100 Hz while inference runs asynchronously on the main thread."""
         period = 0.01
@@ -751,10 +771,21 @@ class G1DDS:
             right_target = self._right_arm_target.copy()
             left_target = self._left_arm_target.copy()
             emergency_damping = self._emergency_damping
+            gravity_only = self._gravity_only
+            gravity_only_kd = self._gravity_only_kd
+        if gravity_only and not emergency_damping:
+            with self._lock:
+                if self._q is None:
+                    raise RuntimeError("cannot compute gravity-only command without LowState")
+                left_gravity_q = self._q[LEFT_ARM_MOTORS].copy()
+                right_gravity_q = self._q[RIGHT_ARM_MOTORS].copy()
+        else:
+            left_gravity_q = left_target
+            right_gravity_q = right_target
         arm_tauff = (
             np.zeros(14, dtype=np.float64)
             if emergency_damping or self._gravity is None
-            else self._gravity.compute(left_target, right_target)
+            else self._gravity.compute(left_gravity_q, right_gravity_q)
         )
         self._cmd.level_flag = 0xFF
         self._cmd.mode_pr = 0
@@ -775,15 +806,15 @@ class G1DDS:
             elif i in LEFT_ARM_MOTORS:
                 arm_index = i - LEFT_ARM_MOTORS[0]
                 motor.tau = float(arm_tauff[arm_index])
-                motor.q = POS_STOP_F if emergency_damping else float(left_target[arm_index])
-                motor.kp = 0.0 if emergency_damping else float(ARM_KP[arm_index])
-                motor.kd = float(ARM_KD[arm_index])
+                motor.q = POS_STOP_F if emergency_damping or gravity_only else float(left_target[arm_index])
+                motor.kp = 0.0 if emergency_damping or gravity_only else float(ARM_KP[arm_index])
+                motor.kd = gravity_only_kd if gravity_only and not emergency_damping else float(ARM_KD[arm_index])
             else:
                 arm_index = i - RIGHT_ARM_MOTORS[0]
                 motor.tau = float(arm_tauff[7 + arm_index])
-                motor.q = POS_STOP_F if emergency_damping else float(right_target[arm_index])
-                motor.kp = 0.0 if emergency_damping else float(ARM_KP[arm_index])
-                motor.kd = float(ARM_KD[arm_index])
+                motor.q = POS_STOP_F if emergency_damping or gravity_only else float(right_target[arm_index])
+                motor.kp = 0.0 if emergency_damping or gravity_only else float(ARM_KP[arm_index])
+                motor.kd = gravity_only_kd if gravity_only and not emergency_damping else float(ARM_KD[arm_index])
         self._cmd.crc = self._crc.Crc(self._cmd)
         self._publisher.Write(self._cmd)
 

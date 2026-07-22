@@ -250,6 +250,19 @@ ensemble 和2倍慢放，再以 `--max-hand-speed 0.5` 限速；`--hand-frequenc
 任意阶段按 Space/Q 或 Ctrl-C 都会锁存急停，
 短暂保持触发时的实测角后停止发布。腿和腰默认只使用速度阻尼，不提供主动平衡能力。
 
+## 单独测试重力补偿
+
+`test_gravity_compensation.py` 不发送手臂位置目标：启用后双臂 `Kp=0`，仅保留小阻尼，
+并按实时实测关节角以100 Hz计算 RH56DFTP 重力前馈，便于吊挂状态下手动拖动感受效果。
+首次默认使用较保守的 `--gravity-scale 0.3`。机器人必须可靠吊挂，启用和停止瞬间都要
+由操作人员托住双臂；按 Enter 才启用，Space/Q/Ctrl-C 会清零前馈并切换阻尼退出。
+
+```bash
+conda run --no-capture-output -n decoupled_vla_collection python \
+  examples/Real_G1/joint_angle_deploy/test_gravity_compensation.py \
+  --network-interface enp7s0 --gravity-scale 0.3
+```
+
 真机前可以用 MuJoCo 播放完全相同的聚合、2倍慢放和限速后命令序列：
 
 ```bash
