@@ -1237,10 +1237,13 @@ def main():
     tty.setcbreak(sys.stdin.fileno())
     initial_left_pose = initialization["left_arm"]
     initial_pose = initialization["right_arm"]
-    initial_right_hand_state = initialization["right_hand_state"]
-    initial_left_hand_state = initialization["left_hand_state"]
     initial_right_hand_command = initialization["right_hand_command"]
     initial_left_hand_command = initialization["left_hand_command"]
+    # Some datasets contain an unpopulated hand-state channel (for example the
+    # sixth value is always zero in grab_red_bottle_test although action.wbc=1).
+    # READY therefore defaults to the hand command that is actually sent.
+    initial_right_hand_state = initial_right_hand_command.copy()
+    initial_left_hand_state = initial_left_hand_command.copy()
     if args.initial_left_arm is not None:
         initial_left_pose = np.asarray(args.initial_left_arm, dtype=np.float64)
     if args.initial_right_arm is not None:
@@ -1282,8 +1285,10 @@ def main():
     )
     print(f"初始化左臂目标: {np.round(initial_left_pose, 4)}")
     print(f"初始化右臂目标: {np.round(initial_pose, 4)}")
-    print(f"初始化左手实测: {np.round(initial_left_hand_state, 4)}")
-    print(f"初始化右手实测: {np.round(initial_right_hand_state, 4)}")
+    print(f"初始化左手 READY 目标: {np.round(initial_left_hand_state, 4)}")
+    print(f"初始化右手 READY 目标: {np.round(initial_right_hand_state, 4)}")
+    print(f"数据左手 observation.state: {np.round(initialization['left_hand_state'], 4)}")
+    print(f"数据右手 observation.state: {np.round(initialization['right_hand_state'], 4)}")
     print(f"初始化左手命令: {np.round(initial_left_hand_command, 4)}")
     print(f"初始化右手命令: {np.round(initial_right_hand_command, 4)}")
     print(

@@ -74,8 +74,12 @@ python g1_joint_client.py --server <A800_1可达IP> --network-interface enp7s0 -
 2. 双臂从 LowState 实测角出发，以同一条 minimum-jerk 曲线移动至初始化数据帧。
    默认读取 `grab_red_bottle_test/data/chunk-000/episode_000000.parquet` 中
    `frame_index=0` 的 `observation.state`：其中 `[15:22]` 为左臂、`[22:29]` 为右臂、
-   `[29:35]` 为左手实测状态、`[35:41]` 为右手实测状态；双手命令读取同一帧
-   `action.wbc[29:41]`。启动日志会打印完整文件、帧号、时间戳和解析出的初始化值。
+   `[29:35]` 为左手记录状态、`[35:41]` 为右手记录状态；双手命令读取同一帧
+   `action.wbc[29:41]`。由于部分数据集存在长期未更新的手指状态通道（例如
+   `grab_red_bottle_test` 的双手第6维记录为 `0`，但实际命令为 `1`），READY 的默认手部
+   目标使用同帧实际下发的 `action.wbc[29:41]`。仍可用 `--initial-left-hand-state` 和
+   `--initial-right-hand-state` 显式覆盖。启动日志会同时打印文件记录状态、READY 目标、
+   完整文件、帧号、时间戳和解析出的初始化值。
    LowCmd 插值终点直接使用所选帧的 `observation.state`。插值结束后根据 LowState
    实测误差缓慢累积一个限速的位置修正量。默认修正速度不超过 `0.03 rad/s`，每个关节
    最多修正 `0.15 rad`；误差小于 `0.003 rad` 时停止积分，避免测量噪声导致漂移。
