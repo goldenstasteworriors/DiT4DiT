@@ -34,6 +34,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 RIGHT_ARM_MOTORS = np.arange(22, 29)
 LEFT_ARM_MOTORS = np.arange(15, 22)
+ARM_MOTORS = np.concatenate((LEFT_ARM_MOTORS, RIGHT_ARM_MOTORS))
 LOWER_BODY_MOTORS = np.arange(0, 15)
 POS_STOP_F = 2146000000.0
 VEL_STOP_F = 16000.0
@@ -745,8 +746,15 @@ class G1DDS:
                 f"timeout={max_age * 1000.0:.1f}ms"
             )
         arrays = (q, dq, tau_est, temperature)
-        if any(array.shape != (29,) or not np.isfinite(array).all() for array in arrays):
-            raise RuntimeError("LowState contains invalid motor values")
+        if any(array.shape != (29,) for array in arrays):
+            raise RuntimeError("LowState contains incomplete motor arrays")
+        invalid_q = np.flatnonzero(~np.isfinite(q))
+        invalid_arm_dq = ARM_MOTORS[np.flatnonzero(~np.isfinite(dq[ARM_MOTORS]))]
+        if invalid_q.size or invalid_arm_dq.size:
+            raise RuntimeError(
+                "LowState contains invalid control state: "
+                f"q_indices={invalid_q.tolist()}, arm_dq_indices={invalid_arm_dq.tolist()}"
+            )
         return arrays
 
     def hand_state(self, max_age: float) -> tuple[np.ndarray, np.ndarray]:

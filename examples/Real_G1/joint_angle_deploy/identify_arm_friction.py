@@ -131,6 +131,7 @@ def _parse_speeds(text: str) -> list[float]:
 def _csv_header() -> list[str]:
     header = [
         "monotonic_time", "elapsed", "phase", "repeat", "nominal_speed", "valid_steady",
+        "torque_measurement_valid",
         "selected_q_cmd", "selected_dq_cmd",
     ]
     for prefix in ("q", "dq", "tau_est", "temperature"):
@@ -319,7 +320,8 @@ def main() -> None:
                     now = time.monotonic()
                     writer.writerow([
                         now, now - start_time, sample.phase, sample.repeat, sample.speed,
-                        int(sample.valid), sample.q, sample.dq,
+                        int(sample.valid and np.isfinite(tau_est[selected_motor])),
+                        int(np.isfinite(tau_est[selected_motor])), sample.q, sample.dq,
                         *q, *dq, *tau_est, *temperature,
                         *command["q"], *command["dq"], *command["tau_ff"],
                         *np.tile(command["kp"], 2), *np.tile(command["kd"], 2),
