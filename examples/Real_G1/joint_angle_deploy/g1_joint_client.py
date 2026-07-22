@@ -621,6 +621,9 @@ class G1DDS:
         self._cmd = unitree_hg_msg_dds__LowCmd_()
         self._crc = CRC()
         self._q = None
+        self._dq = None
+        self._tau_est = None
+        self._motor_temperature = None
         self._mode_machine = 0
         self._stamp = 0.0
         self._last_lowstate_warning_time = 0.0
@@ -632,6 +635,12 @@ class G1DDS:
         self._emergency_damping = False
         self._gravity_only = False
         self._gravity_only_kd = 0.5
+        self._identification_mode = False
+        self._identification_kp = ARM_KP.copy()
+        self._identification_kd = ARM_KD.copy()
+        self._left_arm_velocity_target = np.zeros(7, dtype=np.float64)
+        self._right_arm_velocity_target = np.zeros(7, dtype=np.float64)
+        self._last_arm_command = None
         self._left_arm_target = None
         self._right_arm_target = None
         self._gravity = (
@@ -659,6 +668,13 @@ class G1DDS:
     def _on_state(self, msg):
         with self._lock:
             self._q = np.array([motor.q for motor in msg.motor_state[:29]], dtype=np.float64)
+            self._dq = np.array([motor.dq for motor in msg.motor_state[:29]], dtype=np.float64)
+            self._tau_est = np.array(
+                [motor.tau_est for motor in msg.motor_state[:29]], dtype=np.float64
+            )
+            self._motor_temperature = np.array(
+                [motor.temperature for motor in msg.motor_state[:29]], dtype=np.float64
+            )
             self._mode_machine = int(msg.mode_machine)
             self._stamp = time.monotonic()
 
@@ -711,6 +727,27 @@ class G1DDS:
             )
             self._last_lowstate_warning_time = now
         return state
+
+    def motor_state(self, max_age: float) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Return timestamp-aligned q, dq, estimated torque, and temperature."""
+        now = time.monotonic()
+        with self._lock:
+            if self._q is None or self._dq is None or self._tau_est is None:
+                raise RuntimeError("lowstate missing or stale: no complete motor state received")
+            age = now - self._stamp
+            q = self._q.copy()
+            dq = self._dq.copy()
+            tau_est = self._tau_est.copy()
+            temperature = self._motor_temperature.copy()
+        if age > max_age:
+            raise RuntimeError(
+                f"lowstate missing or stale: age={age * 1000.0:.1f}ms, "
+                f"timeout={max_age * 1000.0:.1f}ms"
+            )
+        arrays = (q, dq, tau_est, temperature)
+        if any(array.shape != (29,) or not np.isfinite(array).all() for array in arrays):
+            raise RuntimeError("LowState contains invalid motor values")
+        return arrays
 
     def hand_state(self, max_age: float) -> tuple[np.ndarray, np.ndarray]:
         """Return measured right/left Inspire state from the DDS-Modbus bridge."""
@@ -771,6 +808,52 @@ class G1DDS:
             self._left_arm_target = left.copy()
             self._right_arm_target = right.copy()
 
+    def enter_arm_identification(self, kp: np.ndarray, kd: np.ndarray):
+        """Enable position/velocity arm commands used by the friction experiment."""
+        kp = np.asarray(kp, dtype=np.float64)
+        kd = np.asarray(kd, dtype=np.float64)
+        if kp.shape != (7,) or kd.shape != (7,):
+            raise ValueError("identification kp/kd must each contain 7 values")
+        if not np.isfinite(kp).all() or not np.isfinite(kd).all() or np.any(kp < 0) or np.any(kd < 0):
+            raise ValueError("identification kp/kd must be finite and non-negative")
+        with self._command_lock:
+            if not self._low_level_enabled or self._emergency_damping:
+                raise RuntimeError("low-level control must be enabled before identification")
+            self._identification_kp = kp.copy()
+            self._identification_kd = kd.copy()
+            self._left_arm_velocity_target.fill(0.0)
+            self._right_arm_velocity_target.fill(0.0)
+            self._identification_mode = True
+
+    def send_identification_arms(
+        self,
+        left_target: np.ndarray,
+        right_target: np.ndarray,
+        left_velocity: np.ndarray,
+        right_velocity: np.ndarray,
+    ):
+        """Update identification position and velocity targets atomically."""
+        arrays = tuple(
+            np.asarray(value, dtype=np.float64)
+            for value in (left_target, right_target, left_velocity, right_velocity)
+        )
+        if any(value.shape != (7,) or not np.isfinite(value).all() for value in arrays):
+            raise ValueError("identification arm targets must be four finite 7-vectors")
+        with self._command_lock:
+            if not self._identification_mode or self._emergency_damping:
+                raise RuntimeError("arm identification mode is not active")
+            self._left_arm_target = arrays[0].copy()
+            self._right_arm_target = arrays[1].copy()
+            self._left_arm_velocity_target = arrays[2].copy()
+            self._right_arm_velocity_target = arrays[3].copy()
+
+    def last_arm_command(self) -> dict[str, np.ndarray] | None:
+        """Return the latest arm command snapshot for synchronized experiment logging."""
+        with self._command_lock:
+            if self._last_arm_command is None:
+                return None
+            return {key: value.copy() for key, value in self._last_arm_command.items()}
+
     def enter_emergency_damping(self):
         """Latch zero-position-gain arm damping without requiring fresh LowState."""
         if not self._low_level_enabled:
@@ -818,6 +901,11 @@ class G1DDS:
             emergency_damping = self._emergency_damping
             gravity_only = self._gravity_only
             gravity_only_kd = self._gravity_only_kd
+            identification_mode = self._identification_mode
+            identification_kp = self._identification_kp.copy()
+            identification_kd = self._identification_kd.copy()
+            left_velocity_target = self._left_arm_velocity_target.copy()
+            right_velocity_target = self._right_arm_velocity_target.copy()
         with self._lock:
             if self._q is None:
                 raise RuntimeError("cannot compute gravity command without LowState")
@@ -854,14 +942,32 @@ class G1DDS:
                 arm_index = i - LEFT_ARM_MOTORS[0]
                 motor.tau = float(arm_tauff[arm_index])
                 motor.q = POS_STOP_F if emergency_damping or gravity_only else float(left_target[arm_index])
-                motor.kp = 0.0 if emergency_damping or gravity_only else float(ARM_KP[arm_index])
-                motor.kd = gravity_only_kd if gravity_only and not emergency_damping else float(ARM_KD[arm_index])
+                motor.dq = float(left_velocity_target[arm_index]) if identification_mode and not emergency_damping else 0.0
+                motor.kp = 0.0 if emergency_damping or gravity_only else float(
+                    identification_kp[arm_index] if identification_mode else ARM_KP[arm_index]
+                )
+                motor.kd = gravity_only_kd if gravity_only and not emergency_damping else float(
+                    identification_kd[arm_index] if identification_mode else ARM_KD[arm_index]
+                )
             else:
                 arm_index = i - RIGHT_ARM_MOTORS[0]
                 motor.tau = float(arm_tauff[7 + arm_index])
                 motor.q = POS_STOP_F if emergency_damping or gravity_only else float(right_target[arm_index])
-                motor.kp = 0.0 if emergency_damping or gravity_only else float(ARM_KP[arm_index])
-                motor.kd = gravity_only_kd if gravity_only and not emergency_damping else float(ARM_KD[arm_index])
+                motor.dq = float(right_velocity_target[arm_index]) if identification_mode and not emergency_damping else 0.0
+                motor.kp = 0.0 if emergency_damping or gravity_only else float(
+                    identification_kp[arm_index] if identification_mode else ARM_KP[arm_index]
+                )
+                motor.kd = gravity_only_kd if gravity_only and not emergency_damping else float(
+                    identification_kd[arm_index] if identification_mode else ARM_KD[arm_index]
+                )
+        with self._command_lock:
+            self._last_arm_command = {
+                "q": np.concatenate((left_target, right_target)),
+                "dq": np.concatenate((left_velocity_target, right_velocity_target)),
+                "tau_ff": arm_tauff.copy(),
+                "kp": identification_kp if identification_mode else ARM_KP.copy(),
+                "kd": identification_kd if identification_mode else ARM_KD.copy(),
+            }
         self._cmd.crc = self._crc.Crc(self._cmd)
         self._publisher.Write(self._cmd)
 
