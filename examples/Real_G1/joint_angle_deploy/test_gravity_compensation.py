@@ -15,11 +15,11 @@ from g1_joint_client import EStop, G1DDS, _read_key
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--network-interface", default="enp7s0")
-    parser.add_argument("--gravity-scale", type=float, default=0.3)
+    parser.add_argument("--gravity-scale", type=float, default=1.0)
     parser.add_argument(
-        "--gravity-hand-model", choices=("rh56dftp", "rubber"), default="rh56dftp"
+        "--gravity-hand-model", choices=("rh56e2", "rh56dftp", "rubber"), default="rh56e2"
     )
-    parser.add_argument("--arm-damping", type=float, default=1.5, help="arm Kd in gravity-only mode")
+    parser.add_argument("--arm-damping", type=float, default=0.5, help="arm Kd in gravity-only mode")
     parser.add_argument("--lowstate-timeout", type=float, default=0.2)
     parser.add_argument("--shutdown-damping-duration", type=float, default=3.0)
     args = parser.parse_args()
@@ -58,7 +58,7 @@ def main() -> None:
                 robot.enter_gravity_only(args.arm_damping)
                 enabled = True
                 print(
-                    f"[ARMED] RH56DFTP gravity-only scale={args.gravity_scale:.3f}；"
+                    f"[ARMED] {args.gravity_hand_model} gravity-only scale={args.gravity_scale:.3f}；"
                     "现在可缓慢移动双臂比较用力程度"
                 )
             time.sleep(0.01)

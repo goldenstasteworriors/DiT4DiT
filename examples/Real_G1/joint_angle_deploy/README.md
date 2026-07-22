@@ -237,10 +237,11 @@ Kp/Kd 与全程重力补偿。需要恢复外环时显式添加
 将 `rnea(q, 0, 0)` 写入双臂 `motor_cmd.tau`；急停阻尼阶段强制将前馈力矩清零。
 可用 `--gravity-scale 0.0~1.0` 保守缩放，或仅在诊断时用
 `--no-gravity-compensation` 关闭；默认使用 `decoupled_wbc` 中的 G1 29-DoF URDF。
-末端惯性默认使用 `--gravity-hand-model rh56dftp`：依据 Unitree G1 官方描述包中的
-`g1_29dof_rev_1_0_with_inspire_hand_FTP.urdf`，将每只 RH56DFTP 的完整手指模型折算为
-`0.8783 kg` 的等效质量和对应质心，加入腕关节的 Pinocchio 动力学模型。该折算对静态
-RNEA 重力矩与完整 FTP URDF 等价。`--gravity-hand-model rubber` 可回退到旧的
+末端惯性默认使用 `--gravity-hand-model rh56e2`：整手质量采用 RH56E2 公开规格
+`0.790 kg`，几何和质心沿用 Unitree G1 官方描述包中的
+`g1_29dof_rev_1_0_with_inspire_hand_FTP.urdf`，折算后加入腕关节的 Pinocchio 动力学模型。
+`--gravity-hand-model rh56dftp` 可对照 Unitree FTP URDF 的 `0.8783 kg` 汇总质量，
+`--gravity-hand-model rubber` 可回退到旧的
 `0.170 kg` rubber-hand 模型，仅用于对照，不适合当前实机。
 双手同时初始化到原始首帧的 `action.wbc` 手部命令，并以 `observation.state` 手部状态
 检查 READY；默认手部容差为0.02。播放时右手使用推理输出后6维，经过相同 temporal
@@ -253,14 +254,16 @@ ensemble 和2倍慢放，再以 `--max-hand-speed 0.5` 限速；`--hand-frequenc
 ## 单独测试重力补偿
 
 `test_gravity_compensation.py` 不发送手臂位置目标：启用后双臂 `Kp=0`，仅保留小阻尼，
-并按实时实测关节角以100 Hz计算 RH56DFTP 重力前馈，便于吊挂状态下手动拖动感受效果。
-首次默认使用较保守的 `--gravity-scale 0.3`。机器人必须可靠吊挂，启用和停止瞬间都要
+并按完整29维实测身体姿态和双臂关节角以100 Hz计算 RH56E2 重力前馈，便于吊挂状态下
+手动拖动感受效果。默认 `Kd=0.5`，可通过 `--arm-damping` 调整；腰部实测角也会进入
+RNEA，不再假设腰关节始终处于零位。
+脚本默认使用完整理论补偿 `--gravity-scale 1.0`。机器人必须可靠吊挂，启用和停止瞬间都要
 由操作人员托住双臂；按 Enter 才启用，Space/Q/Ctrl-C 会清零前馈并切换阻尼退出。
 
 ```bash
 conda run --no-capture-output -n decoupled_vla_collection python \
   examples/Real_G1/joint_angle_deploy/test_gravity_compensation.py \
-  --network-interface enp7s0 --gravity-scale 0.3
+  --network-interface enp7s0 --gravity-hand-model rh56e2 --gravity-scale 1.0
 ```
 
 真机前可以用 MuJoCo 播放完全相同的聚合、2倍慢放和限速后命令序列：

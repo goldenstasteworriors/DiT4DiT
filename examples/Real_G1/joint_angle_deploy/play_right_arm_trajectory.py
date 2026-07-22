@@ -414,8 +414,8 @@ def build_argparser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--gravity-scale", type=float, default=1.0, help="gravity feed-forward scale in [0,1]")
     parser.add_argument(
-        "--gravity-hand-model", choices=("rh56dftp", "rubber"), default="rh56dftp",
-        help="end-effector inertial model; defaults to the installed RH56DFTP hand",
+        "--gravity-hand-model", choices=("rh56e2", "rh56dftp", "rubber"), default="rh56e2",
+        help="end-effector inertial model; defaults to the installed 0.790 kg RH56E2 hand",
     )
     parser.add_argument(
         "--record-dir",

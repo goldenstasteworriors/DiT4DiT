@@ -66,23 +66,35 @@ ARM_JOINT_NAMES = (
     "right_shoulder_yaw_joint", "right_elbow_joint", "right_wrist_roll_joint",
     "right_wrist_pitch_joint", "right_wrist_yaw_joint",
 )
-# Lumped RH56DFTP hand properties derived from Unitree's
+# Lumped Inspire hand properties derived from Unitree's
 # g1_29dof_rev_1_0_with_inspire_hand_FTP.urdf with all finger joints neutral.
 # The base G1 URDF already contains a 0.170 kg rubber hand on each wrist, so
-# adding these positive point-mass equivalents makes its total hand mass and
-# first moment exactly match the full 0.8783 kg FTP model. Static RNEA gravity
-# depends on mass and first moment, not the rotational inertia about the COM.
-RH56DFTP_ADDED_MASS = 0.7083
-RH56DFTP_ADDED_COM = {
-    "left_wrist_yaw_joint": np.array([0.15747250, -0.00100931, 0.00611444]),
-    "right_wrist_yaw_joint": np.array([0.14823332, 0.00155904, 0.00618849]),
+# positive point-mass equivalents replace it with the selected hand's mass and
+# first moment. RH56E2 uses the published 0.790 kg total mass and the same FTP
+# geometry/COM; the legacy FTP profile preserves Unitree URDF's 0.8783 kg sum.
+# Static RNEA gravity depends on mass and first moment, not rotational inertia.
+GRAVITY_HAND_PROFILES = {
+    "rh56e2": {
+        "added_mass": 0.6200,
+        "added_com": {
+            "left_wrist_yaw_joint": np.array([0.15919150, -0.00103825, 0.00622361]),
+            "right_wrist_yaw_joint": np.array([0.14969764, 0.00160315, 0.00629971]),
+        },
+    },
+    "rh56dftp": {
+        "added_mass": 0.7083,
+        "added_com": {
+            "left_wrist_yaw_joint": np.array([0.15747250, -0.00100931, 0.00611444]),
+            "right_wrist_yaw_joint": np.array([0.14823332, 0.00155904, 0.00618849]),
+        },
+    },
 }
 
 
 class ArmGravityCompensator:
     """Pinocchio/RNEA gravity feed-forward matching xrteleoperate's dual-arm control."""
 
-    def __init__(self, urdf_path: Path, scale: float = 1.0, hand_model: str = "rh56dftp"):
+    def __init__(self, urdf_path: Path, scale: float = 1.0, hand_model: str = "rh56e2"):
         try:
             import pinocchio as pin
         except ImportError as exc:
@@ -95,22 +107,25 @@ class ArmGravityCompensator:
             raise FileNotFoundError(f"gravity-compensation URDF not found: {path}")
         if not np.isfinite(scale) or scale < 0.0 or scale > 1.0:
             raise ValueError("gravity-compensation scale must be in [0, 1]")
-        if hand_model not in ("rh56dftp", "rubber"):
+        if hand_model not in (*GRAVITY_HAND_PROFILES, "rubber"):
             raise ValueError(f"unsupported gravity hand model: {hand_model}")
         full_model = pin.buildModelFromUrdf(str(path))
         missing = [name for name in ARM_JOINT_NAMES if not full_model.existJointName(name)]
         if missing:
             raise ValueError(f"gravity-compensation URDF is missing arm joints: {missing}")
-        if hand_model == "rh56dftp":
+        if hand_model in GRAVITY_HAND_PROFILES:
+            profile = GRAVITY_HAND_PROFILES[hand_model]
             zero_inertia = np.zeros((3, 3), dtype=np.float64)
-            for joint_name, com in RH56DFTP_ADDED_COM.items():
+            for joint_name, com in profile["added_com"].items():
                 joint_id = full_model.getJointId(joint_name)
                 full_model.inertias[joint_id] += pin.Inertia(
-                    RH56DFTP_ADDED_MASS, com, zero_inertia
+                    profile["added_mass"], com, zero_inertia
                 )
         arm_ids = {full_model.getJointId(name) for name in ARM_JOINT_NAMES}
         locked_ids = [joint_id for joint_id in range(1, full_model.njoints) if joint_id not in arm_ids]
         self._pin = pin
+        self._full_model = full_model
+        self._full_data = full_model.createData()
         self._model = pin.buildReducedModel(
             full_model, locked_ids, pin.neutral(full_model)
         )
@@ -128,14 +143,40 @@ class ArmGravityCompensator:
             f"scale={self._scale:.3f}，hand_model={hand_model}，URDF={path}"
         )
 
-    def compute(self, left_target: np.ndarray, right_target: np.ndarray) -> np.ndarray:
-        q = np.concatenate((left_target, right_target)).astype(np.float64, copy=False)
-        if q.shape != (14,) or not np.isfinite(q).all():
+    def compute(
+        self,
+        left_target: np.ndarray,
+        right_target: np.ndarray,
+        measured_body_q: np.ndarray | None = None,
+    ) -> np.ndarray:
+        arm_q = np.concatenate((left_target, right_target)).astype(np.float64, copy=False)
+        if arm_q.shape != (14,) or not np.isfinite(arm_q).all():
             raise ValueError("gravity compensation requires 14 finite arm targets")
-        tau = np.asarray(
-            self._pin.rnea(self._model, self._data, q, np.zeros(14), np.zeros(14)),
-            dtype=np.float64,
-        ) * self._scale
+        if measured_body_q is None:
+            tau = np.asarray(
+                self._pin.rnea(
+                    self._model, self._data, arm_q, np.zeros(14), np.zeros(14)
+                ),
+                dtype=np.float64,
+            )
+        else:
+            q = np.asarray(measured_body_q, dtype=np.float64).copy()
+            if q.shape != (29,) or not np.isfinite(q).all():
+                raise ValueError("full-body gravity compensation requires 29 finite measured joints")
+            q[LEFT_ARM_MOTORS] = left_target
+            q[RIGHT_ARM_MOTORS] = right_target
+            full_tau = np.asarray(
+                self._pin.rnea(
+                    self._full_model,
+                    self._full_data,
+                    q,
+                    np.zeros(self._full_model.nv),
+                    np.zeros(self._full_model.nv),
+                ),
+                dtype=np.float64,
+            )
+            tau = np.concatenate((full_tau[LEFT_ARM_MOTORS], full_tau[RIGHT_ARM_MOTORS]))
+        tau *= self._scale
         if tau.shape != (14,) or not np.isfinite(tau).all():
             raise RuntimeError("Pinocchio returned invalid gravity-compensation torques")
         return np.clip(tau, -self._effort_limits, self._effort_limits)
@@ -553,7 +594,7 @@ class G1DDS:
         gravity_compensation: bool = True,
         gravity_urdf: Path = DEFAULT_GRAVITY_URDF,
         gravity_scale: float = 1.0,
-        gravity_hand_model: str = "rh56dftp",
+        gravity_hand_model: str = "rh56e2",
     ):
         from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelPublisher, ChannelSubscriber
         from unitree_sdk2py.comm.motion_switcher.motion_switcher_client import MotionSwitcherClient
@@ -586,7 +627,7 @@ class G1DDS:
         self._low_level_enabled = False
         self._emergency_damping = False
         self._gravity_only = False
-        self._gravity_only_kd = 1.5
+        self._gravity_only_kd = 0.5
         self._left_arm_target = None
         self._right_arm_target = None
         self._gravity = (
@@ -733,7 +774,7 @@ class G1DDS:
         with self._command_lock:
             self._emergency_damping = True
 
-    def enter_gravity_only(self, arm_damping: float = 1.5):
+    def enter_gravity_only(self, arm_damping: float = 0.5):
         """Disable arm position control and compensate gravity at measured joint angles."""
         if not self._low_level_enabled:
             raise RuntimeError("low-level control is not enabled")
@@ -773,19 +814,21 @@ class G1DDS:
             emergency_damping = self._emergency_damping
             gravity_only = self._gravity_only
             gravity_only_kd = self._gravity_only_kd
+        with self._lock:
+            if self._q is None:
+                raise RuntimeError("cannot compute gravity command without LowState")
+            measured_body_q = self._q.copy()
         if gravity_only and not emergency_damping:
-            with self._lock:
-                if self._q is None:
-                    raise RuntimeError("cannot compute gravity-only command without LowState")
-                left_gravity_q = self._q[LEFT_ARM_MOTORS].copy()
-                right_gravity_q = self._q[RIGHT_ARM_MOTORS].copy()
+            left_gravity_q = measured_body_q[LEFT_ARM_MOTORS]
+            right_gravity_q = measured_body_q[RIGHT_ARM_MOTORS]
         else:
-            left_gravity_q = left_target
-            right_gravity_q = right_target
+            left_gravity_q, right_gravity_q = left_target, right_target
         arm_tauff = (
             np.zeros(14, dtype=np.float64)
             if emergency_damping or self._gravity is None
-            else self._gravity.compute(left_gravity_q, right_gravity_q)
+            else self._gravity.compute(
+                left_gravity_q, right_gravity_q, measured_body_q=measured_body_q
+            )
         )
         self._cmd.level_flag = 0xFF
         self._cmd.mode_pr = 0
@@ -883,8 +926,8 @@ def main():
         help="gravity feed-forward scale in [0,1]",
     )
     parser.add_argument(
-        "--gravity-hand-model", choices=("rh56dftp", "rubber"), default="rh56dftp",
-        help="end-effector inertial model; defaults to the installed RH56DFTP hand",
+        "--gravity-hand-model", choices=("rh56e2", "rh56dftp", "rubber"), default="rh56e2",
+        help="end-effector inertial model; defaults to the installed 0.790 kg RH56E2 hand",
     )
     parser.add_argument("--camera", default="0", help="local OpenCV camera index/URL; used only when --camera-host is empty")
     parser.add_argument("--camera-host", default="192.168.123.164", help="SONIC robot camera server; pass an empty string for local camera")
