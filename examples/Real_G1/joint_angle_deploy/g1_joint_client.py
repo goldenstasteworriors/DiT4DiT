@@ -55,6 +55,10 @@ DEFAULT_INITIAL_RIGHT_ARM = np.array(
 DEFAULT_INITIAL_LEFT_HAND_STATE = np.array([0.99900001, 0.99800003, 0.99800003, 0.99800003, 0.99900001, 0.98299998])
 DEFAULT_INITIAL_RIGHT_HAND_STATE = np.array([0.99800003, 1.0, 0.99800003, 0.99800003, 0.99900001, 0.98400003])
 DEFAULT_INITIAL_HAND_COMMAND = np.ones(6, dtype=np.float64)
+DEFAULT_INITIALIZATION_FILE = Path(
+    "/home/ykj/project/SONICMJ/GR00T-WholeBodyControl/outputs/grab_red_bottle_test/"
+    "data/chunk-000/episode_000000.parquet"
+)
 DEFAULT_GRAVITY_URDF = (
     PROJECT_ROOT
     / "decoupled_wbc/gr00t_wbc/control/robot_model/model_data/g1/g1_29dof.urdf"
@@ -905,6 +909,45 @@ def _minimum_jerk(start: np.ndarray, goal: np.ndarray, progress: float) -> np.nd
     return start + blend * (goal - start)
 
 
+def _load_initialization_frame(path: Path, frame_index: int) -> dict[str, object]:
+    """Load arm/hand initialization values from one LeRobot parquet frame."""
+    import pandas as pd
+
+    resolved = path.expanduser().resolve()
+    if not resolved.is_file():
+        raise SystemExit(f"initialization parquet does not exist: {resolved}")
+    table = pd.read_parquet(resolved)
+    required = {"frame_index", "timestamp", "observation.state", "action.wbc"}
+    missing = sorted(required.difference(table.columns))
+    if missing:
+        raise SystemExit(f"initialization parquet missing columns: {', '.join(missing)}")
+    matches = table.index[table["frame_index"].to_numpy() == frame_index].tolist()
+    if len(matches) != 1:
+        raise SystemExit(
+            f"expected exactly one frame_index={frame_index} in {resolved}, found {len(matches)}"
+        )
+    row = table.loc[matches[0]]
+    state = np.asarray(row["observation.state"], dtype=np.float64)
+    action = np.asarray(row["action.wbc"], dtype=np.float64)
+    if state.shape != (41,) or action.shape != (41,):
+        raise SystemExit(
+            f"initialization frame requires 41-D observation.state/action.wbc, got "
+            f"{state.shape}/{action.shape}"
+        )
+    if not np.isfinite(state).all() or not np.isfinite(action).all():
+        raise SystemExit("initialization frame contains non-finite state/action values")
+    return {
+        "path": resolved,
+        "timestamp": float(row["timestamp"]),
+        "left_arm": state[15:22].copy(),
+        "right_arm": state[22:29].copy(),
+        "left_hand_state": state[29:35].copy(),
+        "right_hand_state": state[35:41].copy(),
+        "left_hand_command": action[29:35].copy(),
+        "right_hand_command": action[35:41].copy(),
+    }
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--server", required=True)
@@ -1044,17 +1087,17 @@ def main():
         "--initial-left-arm",
         type=float,
         nargs=7,
-        default=DEFAULT_INITIAL_LEFT_ARM.tolist(),
+        default=None,
         metavar=("SP", "SR", "SY", "E", "WR", "WP", "WY"),
-        help="left-arm deployment pose; default is episode 0 observation.state at 3.0 s",
+        help="optional override for the left arm loaded from --initialization-file",
     )
     parser.add_argument(
         "--initial-right-arm",
         type=float,
         nargs=7,
-        default=DEFAULT_INITIAL_RIGHT_ARM.tolist(),
+        default=None,
         metavar=("SP", "SR", "SY", "E", "WR", "WP", "WY"),
-        help="right-arm deployment pose; default is episode 0 observation.state at 3.0 s",
+        help="optional override for the right arm loaded from --initialization-file",
     )
     parser.add_argument(
         "--initial-right-hand-state",
@@ -1062,22 +1105,34 @@ def main():
         dest="initial_right_hand_state",
         type=float,
         nargs=6,
-        default=DEFAULT_INITIAL_RIGHT_HAND_STATE.tolist(),
-        help="episode-0 measured right Inspire state used for READY and model input",
+        default=None,
+        help="optional override for the measured right-hand initialization state",
     )
     parser.add_argument(
         "--initial-left-hand-state",
         type=float,
         nargs=6,
-        default=DEFAULT_INITIAL_LEFT_HAND_STATE.tolist(),
-        help="episode-0 measured left Inspire state used for READY",
+        default=None,
+        help="optional override for the measured left-hand initialization state",
     )
     parser.add_argument(
         "--initial-hand-command",
         type=float,
         nargs=6,
-        default=DEFAULT_INITIAL_HAND_COMMAND.tolist(),
-        help="episode-0 action.wbc command sent to both Inspire hands",
+        default=None,
+        help="optional override sent to both hands instead of initialization action.wbc",
+    )
+    parser.add_argument(
+        "--initialization-file",
+        type=Path,
+        default=DEFAULT_INITIALIZATION_FILE,
+        help="episode parquet supplying observation.state/action.wbc initialization values",
+    )
+    parser.add_argument(
+        "--initialization-frame",
+        type=int,
+        default=0,
+        help="frame_index selected from --initialization-file",
     )
     parser.add_argument(
         "--timeout-ms",
@@ -1122,6 +1177,11 @@ def main():
         args.max_ik_orientation_residual,
     ) <= 0:
         raise SystemExit("IK and wrist-delta safety parameters must be positive")
+    if args.initialization_frame < 0:
+        raise SystemExit("initialization-frame must be non-negative")
+    initialization = _load_initialization_frame(
+        args.initialization_file, args.initialization_frame
+    )
 
     robot = G1DDS(
         args.network_interface,
@@ -1175,11 +1235,23 @@ def main():
     signal.signal(signal.SIGINT, lambda *_: estop.trigger("Ctrl-C"))
     old_tty = termios.tcgetattr(sys.stdin)
     tty.setcbreak(sys.stdin.fileno())
-    initial_left_pose = np.asarray(args.initial_left_arm, dtype=np.float64)
-    initial_pose = np.asarray(args.initial_right_arm, dtype=np.float64)
-    initial_right_hand_state = np.asarray(args.initial_right_hand_state, dtype=np.float64)
-    initial_left_hand_state = np.asarray(args.initial_left_hand_state, dtype=np.float64)
-    initial_hand_command = np.asarray(args.initial_hand_command, dtype=np.float64)
+    initial_left_pose = initialization["left_arm"]
+    initial_pose = initialization["right_arm"]
+    initial_right_hand_state = initialization["right_hand_state"]
+    initial_left_hand_state = initialization["left_hand_state"]
+    initial_right_hand_command = initialization["right_hand_command"]
+    initial_left_hand_command = initialization["left_hand_command"]
+    if args.initial_left_arm is not None:
+        initial_left_pose = np.asarray(args.initial_left_arm, dtype=np.float64)
+    if args.initial_right_arm is not None:
+        initial_pose = np.asarray(args.initial_right_arm, dtype=np.float64)
+    if args.initial_right_hand_state is not None:
+        initial_right_hand_state = np.asarray(args.initial_right_hand_state, dtype=np.float64)
+    if args.initial_left_hand_state is not None:
+        initial_left_hand_state = np.asarray(args.initial_left_hand_state, dtype=np.float64)
+    if args.initial_hand_command is not None:
+        initial_right_hand_command = np.asarray(args.initial_hand_command, dtype=np.float64)
+        initial_left_hand_command = np.asarray(args.initial_hand_command, dtype=np.float64)
     if np.any(initial_left_pose < LEFT_ARM_LOWER) or np.any(initial_left_pose > LEFT_ARM_UPPER):
         raise SystemExit("initial-left-arm exceeds URDF joint limits")
     if np.any(initial_pose < RIGHT_ARM_LOWER) or np.any(initial_pose > RIGHT_ARM_UPPER):
@@ -1199,15 +1271,21 @@ def main():
     for name, values in (
         ("initial-right-hand-state", initial_right_hand_state),
         ("initial-left-hand-state", initial_left_hand_state),
-        ("initial-hand-command", initial_hand_command),
+        ("initial-right-hand-command", initial_right_hand_command),
+        ("initial-left-hand-command", initial_left_hand_command),
     ):
         if np.any(values < 0.0) or np.any(values > 1.0):
             raise SystemExit(f"{name} must be normalized to [0, 1]")
-    print(f"episode 0 t=3.0s/frame 150 左臂目标: {np.round(initial_left_pose, 4)}")
-    print(f"episode 0 t=3.0s/frame 150 右臂目标: {np.round(initial_pose, 4)}")
-    print(f"episode 0 t=3.0s/frame 150 左手实测: {np.round(initial_left_hand_state, 4)}")
-    print(f"episode 0 t=3.0s/frame 150 右手实测: {np.round(initial_right_hand_state, 4)}")
-    print(f"episode 0 t=3.0s/frame 150 双手命令: {np.round(initial_hand_command, 4)}")
+    print(
+        f"初始化来源: {initialization['path']} | frame={args.initialization_frame} "
+        f"timestamp={initialization['timestamp']:.3f}s"
+    )
+    print(f"初始化左臂目标: {np.round(initial_left_pose, 4)}")
+    print(f"初始化右臂目标: {np.round(initial_pose, 4)}")
+    print(f"初始化左手实测: {np.round(initial_left_hand_state, 4)}")
+    print(f"初始化右手实测: {np.round(initial_right_hand_state, 4)}")
+    print(f"初始化左手命令: {np.round(initial_left_hand_command, 4)}")
+    print(f"初始化右手命令: {np.round(initial_right_hand_command, 4)}")
     print(
         "初始化外环位置补偿: "
         f"{'启用' if args.enable_initial_outer_loop_compensation else '关闭（默认）'}"
@@ -1230,8 +1308,8 @@ def main():
     cache_inference_index = -1
     cache_action_index = 0
     previous_wrist_pose = None
-    right_hand_command = initial_hand_command.copy()
-    left_hand_command = initial_hand_command.copy()
+    right_hand_command = initial_right_hand_command.copy()
+    left_hand_command = initial_left_hand_command.copy()
     try:
         while not estop.latched:
             start = time.monotonic()
@@ -1278,8 +1356,12 @@ def main():
                 progress = (time.monotonic() - init_start_time) / init_duration
                 target = _minimum_jerk(init_start_q, initial_pose, progress)
                 left_target = _minimum_jerk(init_start_left_q, initial_left_pose, progress)
-                right_hand_command = _minimum_jerk(init_start_right_hand, initial_hand_command, progress)
-                left_hand_command = _minimum_jerk(init_start_left_hand, initial_hand_command, progress)
+                right_hand_command = _minimum_jerk(
+                    init_start_right_hand, initial_right_hand_command, progress
+                )
+                left_hand_command = _minimum_jerk(
+                    init_start_left_hand, initial_left_hand_command, progress
+                )
                 if progress >= 1.0:
                     left_error = initial_left_pose - left_arm_q
                     right_error = initial_pose - arm_q

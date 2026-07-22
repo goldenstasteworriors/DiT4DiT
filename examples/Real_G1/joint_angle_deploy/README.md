@@ -71,22 +71,30 @@ python g1_joint_client.py --server <A800_1可达IP> --network-interface enp7s0 -
 真机启动顺序：
 
 1. 程序打印初始化目标关节角，按 Enter 才释放运动服务并启用 `rt/lowcmd`。
-2. 双臂从 LowState 实测角出发，以同一条 minimum-jerk 曲线移动至 episode 0 的
-   `timestamp=3.0 s` 姿态（parquet 第 150 行）。左臂为
-   `[0.133169, 0.162950, 0.432475, -0.277567, -0.154381, 0.039344, -0.230636]`；
-   右臂为
-   `[-0.361888, -0.192083, 0.336661, -0.459164, 0.393083, 0.593854, -0.440780]`；
-   双手平滑下发 episode 0 当时的 `action.wbc=[1,1,1,1,1,1]`。程序通过
-   `rt/inspire/state` 检查 episode 0 实测状态：左手
-   `[0.999,0.998,0.998,0.998,0.999,0.983]`，右手
-   `[0.998,1,0.998,0.998,0.999,0.984]`。
-   LowCmd 插值终点直接使用 episode 0 的 `observation.state`。插值结束后根据 LowState
+2. 双臂从 LowState 实测角出发，以同一条 minimum-jerk 曲线移动至初始化数据帧。
+   默认读取 `grab_red_bottle_test/data/chunk-000/episode_000000.parquet` 中
+   `frame_index=0` 的 `observation.state`：其中 `[15:22]` 为左臂、`[22:29]` 为右臂、
+   `[29:35]` 为左手实测状态、`[35:41]` 为右手实测状态；双手命令读取同一帧
+   `action.wbc[29:41]`。启动日志会打印完整文件、帧号、时间戳和解析出的初始化值。
+   LowCmd 插值终点直接使用所选帧的 `observation.state`。插值结束后根据 LowState
    实测误差缓慢累积一个限速的位置修正量。默认修正速度不超过 `0.03 rad/s`，每个关节
    最多修正 `0.15 rad`；误差小于 `0.003 rad` 时停止积分，避免测量噪声导致漂移。
 3. 程序会同时检查双臂与双手实测误差；手臂全部小于 `0.1 rad`、手指全部小于 `0.02`，
    并连续保持 2 秒才显示 `READY`。READY 后持续保持初始姿态，但不会查询模型；检查现场
    后按 `L` 才开始推理。
 4. 初始化和推理期间按 Space/Q 都会锁存急停。
+
+初始化文件和帧可以显式指定，注意反斜杠处需要换行：
+
+```bash
+python examples/Real_G1/joint_angle_deploy/g1_joint_client.py ... \
+  --initialization-file /home/ykj/project/SONICMJ/GR00T-WholeBodyControl/outputs/grab_red_bottle_test/data/chunk-000/episode_000000.parquet \
+  --initialization-frame 0
+```
+
+`--initialization-frame` 匹配 parquet 的 `frame_index` 列，而不是不透明的 DataFrame 行号。
+原有 `--initial-left-arm`、`--initial-right-arm`、`--initial-left-hand-state`、
+`--initial-right-hand-state` 和 `--initial-hand-command` 仍可使用，并会覆盖文件中对应字段。
 
 添加 `--view-camera` 后，dry-run 会立即打开机器人 `ego_view`；正式部署则在初始化完成、
 进入 `READY` 后自动打开。相机采集与显示在独立线程中，A800 推理期间画面仍持续刷新。
