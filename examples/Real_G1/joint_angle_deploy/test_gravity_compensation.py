@@ -19,7 +19,7 @@ def main() -> None:
     parser.add_argument(
         "--gravity-hand-model", choices=("rh56e2", "rh56dftp", "rubber"), default="rh56e2"
     )
-    parser.add_argument("--arm-damping", type=float, default=0.5, help="arm Kd in gravity-only mode")
+    parser.add_argument("--arm-damping", type=float, default=0.1, help="arm Kd in gravity-only mode")
     parser.add_argument("--lowstate-timeout", type=float, default=0.2)
     parser.add_argument("--shutdown-damping-duration", type=float, default=3.0)
     args = parser.parse_args()

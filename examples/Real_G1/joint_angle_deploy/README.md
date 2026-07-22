@@ -263,7 +263,7 @@ ensemble 和2倍慢放，再以 `--max-hand-speed 0.5` 限速；`--hand-frequenc
 
 `test_gravity_compensation.py` 不发送手臂位置目标：启用后双臂 `Kp=0`，仅保留小阻尼，
 并按完整29维实测身体姿态和双臂关节角以100 Hz计算 RH56E2 重力前馈，便于吊挂状态下
-手动拖动感受效果。默认 `Kd=0.5`，可通过 `--arm-damping` 调整；腰部实测角也会进入
+手动拖动感受效果。默认 `Kd=0.1`，可通过 `--arm-damping` 调整；腰部实测角也会进入
 RNEA，不再假设腰关节始终处于零位。
 脚本默认使用完整理论补偿 `--gravity-scale 1.0`。机器人必须可靠吊挂，启用和停止瞬间都要
 由操作人员托住双臂；按 Enter 才启用，Space/Q/Ctrl-C 会清零前馈并切换阻尼退出。
