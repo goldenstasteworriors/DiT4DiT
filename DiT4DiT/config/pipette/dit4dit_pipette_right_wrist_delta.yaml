@@ -4,6 +4,7 @@ seed: 43
 trackers: [jsonl, wandb]
 wandb_entity: ttyyc-hust
 wandb_project: pipette_right_wrist_delta_action_dit
+wandb_project_by_prompt: true
 is_debug: false
 
 framework:

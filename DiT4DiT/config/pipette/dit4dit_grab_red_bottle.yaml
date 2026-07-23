@@ -3,7 +3,8 @@ run_root_dir: /workspace/WM/DiT4DiT_runs
 seed: 42
 trackers: [jsonl, wandb]
 wandb_entity: ttyyc-hust
-wandb_project: ${run_id}
+wandb_project: grab_red_bottle
+wandb_project_by_prompt: true
 is_debug: false
 
 framework:

@@ -34,6 +34,7 @@ from DiT4DiT.model.framework import build_framework
 from DiT4DiT.training.trainer_utils.trainer_tools import TrainerUtils
 from DiT4DiT.training.trainer_utils.trainer_tools import build_param_lr_groups
 from DiT4DiT.training.trainer_utils.config_tracker import wrap_config, AccessTrackedConfig
+from DiT4DiT.training.wandb_utils import resolve_wandb_project
 # 获取本地 Rank（Ray 通常会自动设置 LOCAL_RANK 环境变量）
 # local_rank = int(os.environ.get("LOCAL_RANK", 0))
 
@@ -266,10 +267,27 @@ class VLATrainer(TrainerUtils):
     def _init_wandb(self):
         """initialize Weights & Biases"""
         if self.accelerator.is_main_process:
+            configured_project = str(self.config.wandb_project)
+            group_by_prompt = bool(getattr(self.config, "wandb_project_by_prompt", True))
+            wandb_project, prompts = resolve_wandb_project(
+                self.vla_train_dataloader.dataset,
+                fallback_project=configured_project,
+                group_by_prompt=group_by_prompt,
+            )
+            if prompts and group_by_prompt:
+                logger.info(
+                    "W&B project resolved from dataset prompt(s): "
+                    f"project={wandb_project!r}, prompts={prompts!r}"
+                )
+            elif group_by_prompt:
+                logger.warning(
+                    "No dataset task prompt found; falling back to configured "
+                    f"W&B project {configured_project!r}."
+                )
             wandb.init(
                 name=self.config.run_id,
                 dir=os.path.join(self.config.output_dir, "wandb"),
-                project=self.config.wandb_project,
+                project=wandb_project,
                 entity=self.config.wandb_entity,
                 group="vla-train",
             )

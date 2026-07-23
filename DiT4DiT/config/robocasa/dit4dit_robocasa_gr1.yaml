@@ -4,6 +4,7 @@ seed: 42
 trackers: [jsonl, wandb]
 wandb_entity: your_wandb_entity
 wandb_project: DiT4DiT
+wandb_project_by_prompt: true
 is_debug: false
 
 framework:
