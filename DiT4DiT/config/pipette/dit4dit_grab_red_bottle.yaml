@@ -106,7 +106,7 @@ trainer:
   save_interval: 5000
   max_checkpoints_to_keep: 0
   checkpoint_modules: action_model
-  eval_interval: 10000
+  eval_interval: 2000
   eval_max_batches: 0
   learning_rate:
     base: 1.0e-5
