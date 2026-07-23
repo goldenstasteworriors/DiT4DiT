@@ -291,6 +291,8 @@ class VLATrainer(TrainerUtils):
                 entity=self.config.wandb_entity,
                 group="vla-train",
             )
+            wandb.define_metric("test_step")
+            wandb.define_metric("test_mse", step_metric="test_step")
 
     def _init_checkpointing(self):
         """Initialize checkpoint directory and handle checkpoint loading."""
@@ -414,6 +416,8 @@ class VLATrainer(TrainerUtils):
 
                 # add epoch info
                 metrics["epoch"] = round(self.completed_steps * self.config.trainer.gradient_accumulation_steps  / len(self.vla_train_dataloader), 2)
+                if "test_mse" in metrics:
+                    metrics["test_step"] = self.completed_steps
 
                 # record to W&B
                 wandb.log(metrics, step=self.completed_steps)
@@ -713,7 +717,7 @@ def main(cfg) -> None:
             }
             evaluation_path = Path(cfg.output_dir) / "evaluation_metrics.json"
             evaluation_path.write_text(json.dumps(evaluation_result, indent=2) + "\n")
-            wandb.log(eval_metrics, step=eval_step)
+            wandb.log({"test_step": eval_step, **eval_metrics})
             logger.info(f"Evaluation result saved to {evaluation_path}: {evaluation_result}")
             wandb.finish()
         accelerator.wait_for_everyone()
