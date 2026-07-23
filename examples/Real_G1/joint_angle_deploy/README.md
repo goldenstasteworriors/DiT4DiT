@@ -134,6 +134,21 @@ python g1_joint_client.py ... --arm \
 目标、命令和实测状态。相邻两行的 `measured_arm_*` 可以用来检查上一行命令执行后的跟踪
 情况；跨 chunk 时还包含同步推理期间持续保持上一目标后的最终实测结果。
 
+推理阶段使用 `--post-action-observation-delay` 设置动作下发到下一次读取观测之间的最小
+等待时间，默认 `0.05 s`。尤其在 `--execution-horizon 1` 时，同步模型推理往往已经超过
+`--frequency` 对应的周期，旧版周期补偿睡眠会变成0，导致动作目标写入后几乎立即读取
+LowState。新版等待时间从实际调用动作下发的时刻单独计时，不会被推理耗时抵消：
+
+```bash
+python examples/Real_G1/joint_angle_deploy/g1_joint_client.py ... \
+  --execution-horizon 1 \
+  --frequency 10 \
+  --post-action-observation-delay 0.05
+```
+
+这是“最小等待时间”：当缓存中连续执行多步且10 Hz周期本身更长时，下一次循环仍会遵守
+10 Hz节拍；当每步都需要同步推理、周期预算已经耗尽时，则保证至少等待50 ms再获取观测。
+
 部署命令添加 `--view-simulation` 会同时打开在线 MuJoCo 影子机器人。它不读取部署记录，
 也不与机器人通信：初始化阶段接收与真机相同频率的 minimum-jerk 双臂目标；模型接管后，
 客户端仍按 `--execution-horizon` 对局部腕部相对位姿逐步累加和求 IK，并把每一步未经实机

@@ -1134,6 +1134,15 @@ def main():
     parser.add_argument("--max-ik-orientation-residual", type=float, default=0.1, help="radians")
     parser.add_argument("--frequency", type=float, default=10.0)
     parser.add_argument("--execution-horizon", type=int, default=4)
+    parser.add_argument(
+        "--post-action-observation-delay",
+        type=float,
+        default=0.05,
+        help=(
+            "minimum seconds between dispatching an action and reading the next observation; "
+            "with execution-horizon=1 this is the policy action-settling delay"
+        ),
+    )
     parser.add_argument("--max-speed", type=float, default=0.25, help="rad/s")
     parser.add_argument("--max-hand-speed", type=float, default=0.5, help="normalized Inspire units/s")
     parser.add_argument(
@@ -1295,6 +1304,8 @@ def main():
         raise SystemExit("IK and wrist-delta safety parameters must be positive")
     if args.initialization_frame < 0:
         raise SystemExit("initialization-frame must be non-negative")
+    if args.post_action_observation_delay < 0.0:
+        raise SystemExit("post-action-observation-delay must be non-negative")
     initialization = _load_initialization_frame(
         args.initialization_file, args.initialization_frame
     )
@@ -1348,6 +1359,10 @@ def main():
         wrist_ik = RightArmIK(args.ik_model.expanduser().resolve(), ik_args)
         print(f"[IK] wrist-delta 在线 FK/IK 已启用，模型: {args.ik_model}")
     estop, period = EStop(), 1.0 / args.frequency
+    print(
+        f"[TIMING] action frequency={args.frequency:.1f}Hz, "
+        f"post-action observation delay={args.post_action_observation_delay * 1000:.1f}ms"
+    )
     signal.signal(signal.SIGINT, lambda *_: estop.trigger("Ctrl-C"))
     old_tty = termios.tcgetattr(sys.stdin)
     tty.setcbreak(sys.stdin.fileno())
@@ -1684,10 +1699,23 @@ def main():
                 # every relative wrist step is reached with zero tracking error.
                 shadow.update(measured, initial_left_pose, desired_arm)
             if enabled:
+                action_dispatched_at = time.monotonic()
                 robot.send_right_arm(target, measured)
                 robot.send_inspire_hands(right_hand_command, left_hand_command)
             else:
+                action_dispatched_at = time.monotonic()
                 print(f"\rdry-run q_target={np.round(target, 3)}", end="", flush=True)
+            # policy.predict() can take longer than the nominal control period.
+            # Therefore the period-based sleep below may be zero. Enforce the
+            # settling delay relative to the actual action dispatch time so the
+            # next loop cannot capture an observation immediately after send.
+            time.sleep(
+                max(
+                    0.0,
+                    args.post_action_observation_delay
+                    - (time.monotonic() - action_dispatched_at),
+                )
+            )
             time.sleep(max(0.0, period - (time.monotonic() - start)))
     except Exception as exc:
         estop.trigger(str(exc))
