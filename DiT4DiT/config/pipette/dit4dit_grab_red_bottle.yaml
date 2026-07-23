@@ -71,6 +71,12 @@ datasets:
     max_action_dim: 16
     action_video_freq_ratio: 2
     video_backend: decord
+    hand_change_oversampling:
+      enabled: false
+      source: action
+      window_before_seconds: 1.0
+      multiplier: 2
+      change_threshold: 1.0e-4
   vla_test_data:
     dataset_py: lerobot_datasets
     data_root_dir: /workspace/WM/DiT4DiT_data/grab_red_bottle/test

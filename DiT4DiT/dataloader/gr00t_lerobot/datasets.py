@@ -68,6 +68,28 @@ LE_ROBOT3_TASKS_FILENAME = "meta/tasks.parquet"
 LE_ROBOT3_EPISODE_FILENAME = "meta/episodes/*/*.parquet"
 
 
+def get_hand_change_oversampling_range(
+    hand_values: np.ndarray,
+    fps: float,
+    window_before_seconds: float,
+    change_threshold: float,
+) -> range | None:
+    """Return the pre-change frame range ending at the first hand change."""
+    values = np.asarray(hand_values, dtype=np.float32)
+    if values.ndim != 2 or values.shape[0] < 2 or values.shape[1] == 0:
+        return None
+
+    frame_changes = np.max(np.abs(np.diff(values, axis=0)), axis=1)
+    changed = np.flatnonzero(frame_changes > change_threshold)
+    if len(changed) == 0:
+        return None
+
+    change_frame = int(changed[0] + 1)
+    lookback_frames = max(0, int(round(float(fps) * window_before_seconds)))
+    start_frame = max(0, change_frame - lookback_frames)
+    return range(start_frame, change_frame + 1)
+
+
 def calculate_dataset_statistics(parquet_paths: list[Path]) -> dict:
     """Calculate the dataset statistics of all columns for a list of parquet files."""
     # Dataset statistics
@@ -458,12 +480,8 @@ class LeRobotSingleDataset(Dataset):
         # Create a hash key based on configuration to ensure cache validity
         config_key = self._get_steps_config_key()
         
-        # Create a unique filename based on config_key
-        # steps_filename = f"steps_{config_key}.pkl"
-        # @BUG
-        # fast get static steps @fangjing --> don't use hash to dynamic sample
-        # 
-        steps_filename =  "steps_data_index.pkl"
+        # Keep separate caches for uniform and hand-change-oversampled datasets.
+        steps_filename = f"steps_{config_key}.pkl"
         steps_path = self.dataset_path / "meta" / steps_filename
         
         # Try to load cached steps first
@@ -471,7 +489,8 @@ class LeRobotSingleDataset(Dataset):
             if steps_path.exists():
                 with open(steps_path, "rb") as f:
                     cached_data = pickle.load(f)
-                return cached_data["steps"]
+                if cached_data.get("config_key") == config_key:
+                    return cached_data["steps"]
         except (FileNotFoundError, pickle.PickleError, KeyError, EOFError) as e:
             print(f"Failed to load cached steps: {e}")
             print("Computing steps from scratch...")
@@ -493,8 +512,10 @@ class LeRobotSingleDataset(Dataset):
             # Ensure the meta directory exists
             steps_path.parent.mkdir(parents=True, exist_ok=True)
             
-            with open(steps_path, "wb") as f:
+            temporary_steps_path = steps_path.with_name(f".{steps_path.name}.{os.getpid()}.tmp")
+            with open(temporary_steps_path, "wb") as f:
                 pickle.dump(cache_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+            os.replace(temporary_steps_path, steps_path)
             print(f"Cached steps saved to {steps_path}")
         except Exception as e:
             print(f"Failed to cache steps: {e}")
@@ -506,10 +527,57 @@ class LeRobotSingleDataset(Dataset):
         config_dict = {
             "delete_pause_frame": self.delete_pause_frame,
             "dataset_name": self.dataset_name,
+            "hand_change_oversampling": self._get_hand_change_oversampling_config(),
         }
         # Create a hash of the configuration
         config_str = str(sorted(config_dict.items()))
         return hashlib.md5(config_str.encode()).hexdigest()[:12]  #
+
+
+    def _get_hand_change_oversampling_config(self) -> dict:
+        configured = self.data_cfg.get("hand_change_oversampling", {}) if self.data_cfg else {}
+        enabled = bool(configured.get("enabled", False)) if configured else False
+        result = {
+            "enabled": enabled,
+            "source": str(configured.get("source", "action")).lower() if configured else "action",
+            "window_before_seconds": (
+                float(configured.get("window_before_seconds", 1.0)) if configured else 1.0
+            ),
+            "multiplier": int(configured.get("multiplier", 2)) if configured else 2,
+            "change_threshold": (
+                float(configured.get("change_threshold", 1e-4)) if configured else 1e-4
+            ),
+        }
+        if result["source"] not in {"state", "action"}:
+            raise ValueError(
+                "hand_change_oversampling.source must be either 'state' or 'action', "
+                f"got {result['source']!r}"
+            )
+        if result["window_before_seconds"] < 0:
+            raise ValueError("hand_change_oversampling.window_before_seconds must be non-negative")
+        if result["multiplier"] < 1:
+            raise ValueError("hand_change_oversampling.multiplier must be at least 1")
+        if result["change_threshold"] < 0:
+            raise ValueError("hand_change_oversampling.change_threshold must be non-negative")
+        return result
+
+    def _get_hand_values(self, data: pd.DataFrame, source: str) -> np.ndarray | None:
+        source_metadata = getattr(self.lerobot_modality_meta, source)
+        configured_keys = {
+            key.removeprefix(f"{source}.") for key in self.modality_keys.get(source, [])
+        }
+        hand_arrays = []
+        for key, metadata in source_metadata.items():
+            if key not in configured_keys or "hand" not in key.lower():
+                continue
+            original_key = metadata.original_key or key
+            if original_key not in data.columns:
+                continue
+            values = np.stack(data[original_key].to_numpy())
+            hand_arrays.append(values[:, metadata.start : metadata.end])
+        if not hand_arrays:
+            return None
+        return np.concatenate(hand_arrays, axis=1)
 
 
     def _get_all_steps_single_process(self) -> list[tuple[int, int]]:
@@ -517,6 +585,10 @@ class LeRobotSingleDataset(Dataset):
         all_steps: list[tuple[int, int]] = []
         skipped_trajectories = 0
         processed_trajectories = 0
+        oversampled_trajectories = 0
+        additional_oversampled_steps = 0
+        oversampling = self._get_hand_change_oversampling_config()
+        fps = float(self.lerobot_info_meta.get("fps", 1.0))
         
         # Check if language modality is configured
         has_language_modality = 'language' in self.modality_keys and len(self.modality_keys['language']) > 0
@@ -548,12 +620,38 @@ class LeRobotSingleDataset(Dataset):
         
             if not trajectory_skipped:
                 processed_trajectories += 1
+
+            oversampling_range = None
+            if oversampling["enabled"] and oversampling["multiplier"] > 1:
+                hand_values = self._get_hand_values(data, oversampling["source"])
+                if hand_values is not None:
+                    oversampling_range = get_hand_change_oversampling_range(
+                        hand_values=hand_values,
+                        fps=fps,
+                        window_before_seconds=oversampling["window_before_seconds"],
+                        change_threshold=oversampling["change_threshold"],
+                    )
+                    if oversampling_range is not None:
+                        oversampled_trajectories += 1
         
             for base_index in range(trajectory_length):
                 all_steps.append((trajectory_id, base_index))
+                if oversampling_range is not None and base_index in oversampling_range:
+                    repeats = oversampling["multiplier"] - 1
+                    all_steps.extend([(trajectory_id, base_index)] * repeats)
+                    additional_oversampled_steps += repeats
                 
         # Print summary statistics
         print(f"Single-process summary: Processed {processed_trajectories} trajectories, skipped {skipped_trajectories} empty trajectories")
+        if oversampling["enabled"]:
+            print(
+                "Hand-change oversampling summary: "
+                f"source={oversampling['source']}, "
+                f"window_before_seconds={oversampling['window_before_seconds']}, "
+                f"multiplier={oversampling['multiplier']}, "
+                f"oversampled_trajectories={oversampled_trajectories}, "
+                f"additional_steps={additional_oversampled_steps}"
+            )
         print(f"Total steps: {len(all_steps)} from {len(self.trajectory_ids)} trajectories")
                    
         return all_steps
